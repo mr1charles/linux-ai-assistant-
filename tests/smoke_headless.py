@@ -194,6 +194,61 @@ if win is not None:
     finally:
         app.screen_control.deny()
 
+# -- the Dynamic Island's notification card --------------------------------
+if win is not None:
+    try:
+        pressed = []
+        win.island.show_card("Toby has a reply", "A short preview of the answer.",
+                             [("Open", lambda: pressed.append("open")),
+                              ("Dismiss", lambda: pressed.append("dismiss"))])
+        if not win.island.showing_card():
+            errors.append("the island did not go into card mode")
+        buttons = win.island.card_actions.get_children()
+        if len(buttons) != 2:
+            errors.append(f"the card should show 2 buttons, showed {len(buttons)}")
+        else:
+            buttons[0].emit("clicked")
+            if pressed != ["open"]:
+                errors.append(f"pressing a card button ran the wrong thing: {pressed}")
+            if win.island.showing_card():
+                errors.append("the card stayed open after its button was pressed")
+
+        # a card that asks to stay open should stay open
+        win.island.show_card("Still working", "",
+                             [("Keep", lambda: "keep")])
+        win.island.card_actions.get_children()[0].emit("clicked")
+        if not win.island.showing_card():
+            errors.append("a card that returned 'keep' closed anyway")
+
+        # a failing action must not take the card down with it
+        def explode():
+            raise RuntimeError("deliberate")
+
+        win.island.show_card("Careful", "", [("Boom", explode)])
+        win.island.card_actions.get_children()[0].emit("clicked")
+
+        # going back to the plain status pill drops the card
+        win.island.hide_island()
+        if win.island.showing_card():
+            errors.append("hiding the island left it in card mode")
+        if win.island.card_actions.get_children():
+            errors.append("hiding the island left the card's buttons behind")
+
+        # the real path: a finished reply with the panel closed
+        win.set_visible(False)
+        win._show_reply_card("what is this", "Here is a reply. " * 40)
+        if not win.island.showing_card():
+            errors.append("a finished reply with the panel closed showed no card")
+        labels = [b.get_label() for b in win.island.card_actions.get_children()]
+        if labels != ["Open", "Explain", "Later", "Dismiss"]:
+            errors.append(f"unexpected card actions: {labels}")
+        body = win.island.card_body.get_text()
+        if len(body) > 230:
+            errors.append(f"the reply preview was not shortened ({len(body)} chars)")
+        win.island.hide_island()
+    except Exception:
+        errors.append("island card: " + traceback.format_exc())
+
 # pure-logic checks that need no widgets at all
 def expect(label, got, want):
     if got != want:

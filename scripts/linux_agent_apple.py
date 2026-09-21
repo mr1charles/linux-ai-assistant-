@@ -1305,6 +1305,7 @@ class DynamicIsland(Gtk.Window):
         self._visible_target = False
         self._click_timeout_id = None
         self._last_press_time = None
+        self._showing_card = False
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
@@ -1338,6 +1339,33 @@ class DynamicIsland(Gtk.Window):
         inner.pack_start(self.label, False, False, 0)
 
         box.connect("button-press-event", self._on_button_press)
+
+        # The island has two shapes. While Toby is working it is the compact
+        # pill above: a pulsing dot and one line of status, not worth
+        # interrupting anyone for. When it has something for the user it
+        # becomes the card below, with the reply itself and buttons for what
+        # to do about it — because a notification that can only be read is a
+        # notification you have to go and act on somewhere else.
+        column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        column.pack_start(inner, False, False, 0)
+
+        self.card_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.card_box.set_border_width(12)
+        self.card_box.set_no_show_all(True)
+
+        self.card_body = Gtk.Label(label="")
+        self.card_body.set_xalign(0)
+        self.card_body.set_line_wrap(True)
+        self.card_body.set_max_width_chars(52)
+        self.card_body.get_style_context().add_class("apple-agent-island-card-body")
+        self.card_box.pack_start(self.card_body, False, False, 0)
+
+        self.card_actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.card_box.pack_start(self.card_actions, False, False, 0)
+
+        column.pack_start(self.card_box, False, False, 0)
+        box.remove(inner)
+        box.add(column)
         self.add(box)
 
         self.show_all()
@@ -1353,6 +1381,10 @@ class DynamicIsland(Gtk.Window):
         # the island to open the task view did nothing. Time the gap between
         # presses by hand instead — the same approach the face already uses.
         if event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        if self._showing_card:
+            # the card's own buttons say what happens; a stray click on the
+            # background around them shouldn't also do something
             return False
         now_ms = event.time
         previous = self._last_press_time
@@ -1393,6 +1425,51 @@ class DynamicIsland(Gtk.Window):
     def set_status(self, text):
         self.label.set_text(text)
 
+    def show_card(self, headline, body, actions):
+        """Show the island as a notification card.
+
+        actions is a list of (label, callback). Each callback is run on the
+        GTK thread and the card closes itself afterwards, unless the callback
+        returns the string "keep".
+        """
+        self.set_status(headline)
+        for child in self.card_actions.get_children():
+            self.card_actions.remove(child)
+        self.card_body.set_text(body)
+        self.card_body.set_visible(bool(body))
+
+        for label, callback in actions:
+            button = Gtk.Button(label=label)
+            button.get_style_context().add_class("apple-agent-panel-button")
+            button.connect("clicked", self._make_card_handler(callback))
+            self.card_actions.pack_start(button, False, False, 0)
+
+        self.card_box.set_visible(True)
+        self.card_box.show_all()
+        self.card_body.set_visible(bool(body))
+        self._showing_card = True
+        self.show_island(headline)
+
+    def _make_card_handler(self, callback):
+        def on_clicked(_button):
+            outcome = None
+            try:
+                outcome = callback()
+            except Exception as e:
+                print("ISLAND CARD ACTION ERROR:", e, flush=True)
+            if outcome != "keep":
+                self.hide_island()
+        return on_clicked
+
+    def hide_card(self):
+        self._showing_card = False
+        self.card_box.set_visible(False)
+        for child in self.card_actions.get_children():
+            self.card_actions.remove(child)
+
+    def showing_card(self):
+        return self._showing_card
+
     def show_island(self, text):
         self.set_status(text)
         if self._visible_target:
@@ -1416,6 +1493,7 @@ class DynamicIsland(Gtk.Window):
         GLib.timeout_add(14, step)
 
     def hide_island(self):
+        self.hide_card()
         if not self._visible_target:
             return
         self._visible_target = False
@@ -2351,7 +2429,13 @@ button.apple-agent-primary-button:hover {{
 .apple-agent-island-label {{
     color: {INK_BRIGHT};
     font-size: {TYPE_SMALL}px;
+    font-weight: bold;
     padding: 0 2px;
+}}
+.apple-agent-island-card-body {{
+    color: {INK_NORMAL};
+    font-size: {TYPE_BODY}px;
+    padding: 2px 0 4px 0;
 }}
 .apple-agent-island-task {{
     color: {INK_BRIGHT};
@@ -4539,8 +4623,7 @@ class AssistantWindow(Gtk.Window):
         if self.get_visible():
             self.island.hide_island()
         elif SETTINGS.get("notifications_enabled", True):
-            self.island.show_island("Toby has a reply ready")
-            GLib.timeout_add_seconds(5, self.island.hide_island)
+            self._show_reply_card(text, reply_text)
 
         self.history.append({"role": "user", "content": text})
         self.history.append({"role": "assistant", "content": reply_text})
@@ -4581,6 +4664,47 @@ class AssistantWindow(Gtk.Window):
 
         GLib.timeout_add_seconds(6, self._back_to_idle)
         return False
+
+    # -- notification cards -----------------------------------------------------
+    SNOOZE_SECONDS = 300
+
+    def _show_reply_card(self, asked, reply_text):
+        """Offer the finished reply as something the user can act on.
+
+        Toby answers with the panel closed often enough — a voice command, a
+        background task, a reply that arrived after the panel was dismissed —
+        that "Toby has a reply ready" on its own was a dead end. The reply
+        itself is right there now, with the four things anyone actually wants
+        to do about it.
+        """
+        preview = " ".join(reply_text.split())
+        if len(preview) > 220:
+            preview = preview[:217] + "…"
+
+        def open_panel():
+            self.show_panel()
+            self.answer.set_text(reply_text)
+            self.answer.set_visible(True)
+            self.answer.show()
+
+        def explain():
+            self.show_panel()
+            self.entry.set_text("Explain that in more detail.")
+            self.on_submit(self.entry)
+
+        def later():
+            GLib.timeout_add_seconds(
+                self.SNOOZE_SECONDS,
+                lambda: self._show_reply_card(asked, reply_text) or False)
+
+        self.island.show_card(
+            "Toby has a reply",
+            preview,
+            [("Open", open_panel),
+             ("Explain", explain),
+             ("Later", later),
+             ("Dismiss", lambda: None)],
+        )
 
     def update_streaming_answer(self, content):
         display = extract_partial_reply(content)
