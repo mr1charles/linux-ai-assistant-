@@ -1,0 +1,10 @@
+requests
+vosk
+sounddevice
+PyGObject
+pycairo
+matplotlib
+networkx
+opencv-python
+mediapipe
+pypdf

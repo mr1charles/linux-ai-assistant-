@@ -1,0 +1,13 @@
+[Unit]
+Description=Little Toby desktop assistant
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/linux-agent
+EnvironmentFile=%h/linux-agent/.env
+ExecStart=/usr/bin/python3 %h/linux-agent/scripts/linux_agent_apple.py
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
