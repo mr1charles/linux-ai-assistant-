@@ -222,6 +222,23 @@ class ScreenControl:
         px, py = self._to_pixels(end_x, end_y)
         return f"Gliding mouse to ({px}, {py})"
 
+    def move_immediate(self, x_frac, y_frac):
+        """Jump the pointer straight to a position, with no glide.
+
+        move() eases the pointer over about a third of a second, which is
+        right when Toby is doing something on the user's behalf and wrong
+        when the pointer is following a hand — there, every frame is a new
+        target and the easing just adds lag. Same consent gate either way.
+        """
+        self._guard()
+        x_frac = max(0.0, min(1.0, float(x_frac)))
+        y_frac = max(0.0, min(1.0, float(y_frac)))
+        px, py = self._to_pixels(x_frac, y_frac)
+        outcome = move_pointer(px, py)
+        if outcome == "ok":
+            self.current_x_frac, self.current_y_frac = x_frac, y_frac
+        return outcome
+
     def click(self, button="left"):
         self._guard()
         return press_button(button)

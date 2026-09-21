@@ -17,6 +17,7 @@ Both use matplotlib (no pygraphviz dependency — a simple manual layout).
 
 import json
 import subprocess
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -254,50 +255,132 @@ def render_bubbles() -> str:
 # widget to draw, pan, zoom, and let the user edit directly.
 # ---------------------------------------------------------------------------
 
-def get_graph_data() -> dict:
-    """Returns {"nodes": [{id, label, category, x, y}], "edges": [{source, target}]}
-    with x/y already normalized to 0..1. Empty lists if there's nothing yet."""
-    data = _load()
-    if not data["facts"]:
-        return {"nodes": [], "edges": []}
+LAYOUTS = ("force", "radial", "mindmap")
 
+
+def _facts_by_category(facts):
+    grouped = {}
+    for fact in facts:
+        grouped.setdefault(fact["category"], []).append(fact)
+    # A stable order, so the picture doesn't rearrange itself between visits.
+    return dict(sorted(grouped.items()))
+
+
+def _normalize(positions):
+    """Scale a set of positions into the 0..1 box the view expects."""
+    if not positions:
+        return {}
+    xs = [p[0] for p in positions.values()]
+    ys = [p[1] for p in positions.values()]
+    min_x, max_x = min(xs), max(xs)
+    min_y, max_y = min(ys), max(ys)
+    span_x = (max_x - min_x) or 1.0
+    span_y = (max_y - min_y) or 1.0
+    return {k: ((x - min_x) / span_x, (y - min_y) / span_y)
+            for k, (x, y) in positions.items()}
+
+
+def _force_layout(facts, edges):
+    """Springs: related facts pull together, everything else pushes apart.
+
+    Good for seeing which parts of what Toby knows are densely connected,
+    less good for finding one particular fact.
+    """
     import networkx as nx
 
-    G = nx.Graph()
-    for f in data["facts"]:
-        G.add_node(f["id"], label=f["text"], category=f["category"])
+    graph = nx.Graph()
+    for fact in facts:
+        graph.add_node(fact["id"])
+    graph.add_edges_from(edges)
+    if graph.number_of_nodes() <= 1:
+        return {n: (0.5, 0.5) for n in graph.nodes}
+    # A fixed seed, so the same facts always land in the same arrangement
+    # rather than being reshuffled every time the page is opened.
+    return nx.spring_layout(graph, k=0.9, seed=42)
 
-    by_category = {}
-    for f in data["facts"]:
-        by_category.setdefault(f["category"], []).append(f["id"])
-    for ids in by_category.values():
+
+def _radial_layout(facts):
+    """One wedge of a circle per category, facts along an arc inside it.
+
+    Good for seeing the shape of a category at a glance: how many facts it
+    holds, and how it compares in size to the others.
+    """
+    grouped = _facts_by_category(facts)
+    positions = {}
+    category_count = len(grouped) or 1
+    for category_index, (_category, items) in enumerate(grouped.items()):
+        wedge_centre = 2 * math.pi * category_index / category_count
+        wedge_width = 2 * math.pi / category_count * 0.75
+        for item_index, fact in enumerate(items):
+            # spread facts across the wedge, and out along it in rings so a
+            # large category doesn't collapse into one crowded arc
+            fraction = (item_index + 0.5) / len(items)
+            angle = wedge_centre + (fraction - 0.5) * wedge_width
+            ring = 0.35 + 0.65 * ((item_index % 3) / 2.0)
+            positions[fact["id"]] = (math.cos(angle) * ring, math.sin(angle) * ring)
+    return positions
+
+
+def _mindmap_layout(facts):
+    """A tree: categories as branches down the page, facts along each branch.
+
+    Good for reading, because nothing overlaps and the order is predictable —
+    the closest of the three to something you could scan like a list.
+    """
+    grouped = _facts_by_category(facts)
+    positions = {}
+    category_count = len(grouped) or 1
+    for category_index, (_category, items) in enumerate(grouped.items()):
+        # each category is a horizontal band
+        band_y = (category_index + 0.5) / category_count
+        for item_index, fact in enumerate(items):
+            column = (item_index + 0.5) / max(len(items), 1)
+            # alternate slightly above and below the band's centre line, so
+            # long labels have somewhere to go
+            wobble = 0.16 / category_count * (1 if item_index % 2 else -1)
+            positions[fact["id"]] = (column, band_y + wobble)
+    return positions
+
+
+def get_graph_data(layout: str = "force") -> dict:
+    """Positions and links for the in-app Memories view.
+
+    Returns {"nodes": [{id, label, category, x, y}], "edges": [{source, target}]}
+    with x and y already normalized to 0..1, and empty lists when nothing has
+    been learned yet. The three layouts answer different questions — see each
+    one's own note — and the links between facts are the same in all of them.
+    """
+    data = _load()
+    facts = data["facts"]
+    if not facts:
+        return {"nodes": [], "edges": []}
+
+    # Facts in the same category are treated as related to one another.
+    edges = []
+    for items in _facts_by_category(facts).values():
+        ids = [f["id"] for f in items]
         for i in range(len(ids)):
             for j in range(i + 1, len(ids)):
-                G.add_edge(ids[i], ids[j])
+                edges.append((ids[i], ids[j]))
 
-    pos = nx.spring_layout(G, k=0.9, seed=42) if G.number_of_nodes() > 1 else {
-        n: (0.5, 0.5) for n in G.nodes
-    }
+    if layout not in LAYOUTS:
+        layout = "force"
+    if layout == "radial":
+        positions = _radial_layout(facts)
+    elif layout == "mindmap":
+        positions = _mindmap_layout(facts)
+    else:
+        positions = _force_layout(facts, edges)
 
-    xs = [p[0] for p in pos.values()] or [0.0]
-    ys = [p[1] for p in pos.values()] or [0.0]
-    minx, maxx = min(xs), max(xs)
-    miny, maxy = min(ys), max(ys)
-    spanx = (maxx - minx) or 1.0
-    spany = (maxy - miny) or 1.0
-
-    nodes = []
-    for n in G.nodes:
-        x, y = pos[n]
-        nodes.append({
-            "id": n,
-            "label": G.nodes[n]["label"],
-            "category": G.nodes[n]["category"],
-            "x": (x - minx) / spanx,
-            "y": (y - miny) / spany,
-        })
-    edges = [{"source": u, "target": v} for u, v in G.edges()]
-    return {"nodes": nodes, "edges": edges}
+    positions = _normalize(positions)
+    nodes = [{
+        "id": f["id"],
+        "label": f["text"],
+        "category": f["category"],
+        "x": positions.get(f["id"], (0.5, 0.5))[0],
+        "y": positions.get(f["id"], (0.5, 0.5))[1],
+    } for f in facts]
+    return {"nodes": nodes, "edges": [{"source": u, "target": v} for u, v in edges]}
 
 
 def delete_fact(fact_id: str) -> bool:

@@ -350,6 +350,93 @@ def install_package(package_name):
 
 screen_control = ScreenControl()
 
+
+# ---------------------------------------------------------------------------
+# Pointer driver — used by Camera Mode's pinch-to-point
+#
+# Hand tracking produces a new pointer target every camera frame, and every
+# pointer move is a subprocess call that can block for its full timeout when
+# ydotoold isn't running. Doing that inline would stall the camera loop; doing
+# it on the GTK thread would stall the interface. So moves happen on a thread
+# of their own that only ever cares about the most recent target — if frames
+# arrive faster than the pointer can be moved, the stale ones are dropped
+# rather than queued, which is what keeps the cursor tracking the hand instead
+# of lagging behind it.
+# ---------------------------------------------------------------------------
+
+class PointerDriver:
+    MIN_INTERVAL_S = 0.04  # ~25 pointer updates a second is plenty
+
+    def __init__(self, control):
+        self._control = control
+        self._lock = threading.Lock()
+        self._target = None
+        self._click_pending = False
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._thread = None
+        self.last_error = ""
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        self._wake.set()
+        with self._lock:
+            self._target = None
+            self._click_pending = False
+
+    def aim(self, x_frac, y_frac):
+        """Set where the pointer should be. The newest call wins."""
+        with self._lock:
+            self._target = (x_frac, y_frac)
+        self._wake.set()
+
+    def request_click(self):
+        with self._lock:
+            self._click_pending = True
+        self._wake.set()
+
+    def _run(self):
+        last_move = 0.0
+        while not self._stop.is_set():
+            self._wake.wait(0.2)
+            self._wake.clear()
+            if self._stop.is_set():
+                return
+            with self._lock:
+                target = self._target
+                self._target = None
+                wants_click = self._click_pending
+                self._click_pending = False
+            try:
+                if target is not None and time.monotonic() - last_move >= self.MIN_INTERVAL_S:
+                    outcome = self._control.move_immediate(*target)
+                    last_move = time.monotonic()
+                    if outcome != "ok":
+                        self.last_error = "Couldn't move the pointer — is ydotoold running?"
+                        self._stop.set()
+                        return
+                if wants_click:
+                    self._control.click("left")
+            except NeedsConfirmation:
+                # consent was withdrawn mid-session; stand down quietly
+                self.last_error = "Mouse control is off."
+                self._stop.set()
+                return
+            except Exception as e:
+                self.last_error = str(e)
+                self._stop.set()
+                return
+
+
+pointer_driver = PointerDriver(screen_control)
+
 last_screen_context = ""
 
 
@@ -2924,6 +3011,20 @@ class AssistantWindow(Gtk.Window):
         memories_heading.set_xalign(0)
         memories_heading.get_style_context().add_class("apple-agent-section-heading")
         memories_page.pack_start(memories_heading, False, False, 0)
+        layout_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        layout_row.pack_start(Gtk.Label(label="Layout"), False, False, 0)
+        self.memory_layout_buttons = {}
+        current_layout = SETTINGS.get("memory_graph_layout", "force")
+        for layout_key, layout_label in toby_settings.MEMORY_GRAPH_LAYOUTS:
+            btn = Gtk.Button(label=layout_label)
+            btn.get_style_context().add_class("apple-agent-nav-button")
+            if layout_key == current_layout:
+                btn.get_style_context().add_class("nav-selected")
+            btn.connect("clicked", lambda _b, k=layout_key: self.on_memory_layout_clicked(k))
+            layout_row.pack_start(btn, False, False, 0)
+            self.memory_layout_buttons[layout_key] = btn
+        memories_page.pack_start(layout_row, False, False, 0)
+
         self.memory_graph = MemoryGraphView(on_select=self.on_memory_node_select)
         self.memory_graph.set_size_request(-1, 380)
         memories_page.pack_start(self.memory_graph, True, True, 0)
@@ -3134,6 +3235,27 @@ class AssistantWindow(Gtk.Window):
         camera_switch_row.pack_end(self.settings_camera_switch, False, False, 0)
         settings_page.pack_start(camera_switch_row, False, False, 0)
 
+        pinch_cursor_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        pinch_cursor_row.pack_start(Gtk.Label(label="Point with your hand to move the cursor"),
+                                     False, False, 0)
+        self.settings_pinch_cursor_switch = Gtk.Switch()
+        self.settings_pinch_cursor_switch.set_active(SETTINGS.get("camera_pinch_cursor", False))
+        self.settings_pinch_cursor_switch.connect("state-set", self._on_pinch_cursor_switch_toggled)
+        pinch_cursor_row.pack_end(self.settings_pinch_cursor_switch, False, False, 0)
+        settings_page.pack_start(pinch_cursor_row, False, False, 0)
+
+        pinch_cursor_note = Gtk.Label(
+            label="Your index fingertip moves the real cursor and pinching your thumb and "
+                  "index finger together clicks, so you can select things without touching "
+                  "the trackpad. Off by default, and the first time you turn it on it asks "
+                  "for the same mouse-control permission any other pointer action needs. "
+                  "Needs Camera Mode on as well."
+        )
+        pinch_cursor_note.set_xalign(0)
+        pinch_cursor_note.set_line_wrap(True)
+        pinch_cursor_note.get_style_context().add_class("apple-agent-dashboard-title")
+        settings_page.pack_start(pinch_cursor_note, False, False, 4)
+
         camera_builtin_note = Gtk.Label(
             label="Built-in gestures: open palm = toggle panel, fist = hide, swipe = switch "
                   "workspace, push/pull = confirm/cancel, spread fingers = fullscreen, rotate = "
@@ -3315,10 +3437,20 @@ class AssistantWindow(Gtk.Window):
         self.camera_overlay = CameraOverlay()
         self._camera_recording_name = None
         self._pending_camera_action_for_record = None
+        self._pinch_cursor_armed = False
+        self._pinch_held = False
+        self._pointer_smoothed = None
+        self._last_pinch_click = 0.0
+        self._pending_confirm_purpose = None
         self.refresh_camera_gesture_list()
         if SETTINGS.get("camera_mode_enabled", False):
             self.camera.start()
             self.camera_overlay.set_visible(True)
+            if SETTINGS.get("camera_pinch_cursor", False):
+                # Deliberately not armed yet — hand pointing still has to be
+                # confirmed, and that prompt belongs on screen after the
+                # window exists, not during construction.
+                GLib.timeout_add_seconds(1, lambda: self._arm_pinch_cursor() or False)
 
         self.task_cancelled = False
         self.task_steps = []       # [(label, status), ...] for the expanded view
@@ -3484,8 +3616,27 @@ class AssistantWindow(Gtk.Window):
 
     # -- Memories ---------------------------------------------------------------
     def refresh_memory_graph(self):
-        data = knowledge.get_graph_data()
+        layout = SETTINGS.get("memory_graph_layout", "force")
+        data = knowledge.get_graph_data(layout)
         self.memory_graph.load_data(data["nodes"], data["edges"])
+
+    def on_memory_layout_clicked(self, layout_key):
+        """Switch between the three ways of arranging what Toby knows.
+
+        Each answers a different question — the force layout shows which
+        parts are densely related, the radial one compares categories by
+        size, and the mind map is the one you can actually read down.
+        """
+        SETTINGS["memory_graph_layout"] = layout_key
+        toby_settings.save(SETTINGS)
+        for key, btn in self.memory_layout_buttons.items():
+            context = btn.get_style_context()
+            if key == layout_key:
+                context.add_class("nav-selected")
+            else:
+                context.remove_class("nav-selected")
+        self.memory_graph.reset_view()
+        self.refresh_memory_graph()
 
     def _refresh_memories_if_showing(self):
         """Called from the background bookkeeping thread after fact extraction.
@@ -3876,27 +4027,141 @@ class AssistantWindow(Gtk.Window):
         new_state = not SETTINGS.get("camera_mode_enabled", False)
         SETTINGS["camera_mode_enabled"] = new_state
         toby_settings.save(SETTINGS)
+        self.settings_camera_switch.handler_block_by_func(self._on_camera_switch_toggled)
         self.settings_camera_switch.set_active(new_state)
+        self.settings_camera_switch.handler_unblock_by_func(self._on_camera_switch_toggled)
         if new_state:
             self.camera.start()
             self.camera_overlay.set_visible(True)
+            if SETTINGS.get("camera_pinch_cursor", False):
+                self._arm_pinch_cursor()
         else:
             self.camera.stop()
+            self._disarm_pinch_cursor()
             self.camera_overlay.set_visible(False)
 
     def _on_camera_switch_toggled(self, widget, state):
-        SETTINGS["camera_mode_enabled"] = state
+        SETTINGS["camera_mode_enabled"] = bool(state)
         toby_settings.save(SETTINGS)
         if state:
             self.camera.start()
             self.camera_overlay.set_visible(True)
+            if SETTINGS.get("camera_pinch_cursor", False):
+                self._arm_pinch_cursor()
         else:
             self.camera.stop()
+            self._disarm_pinch_cursor()
             self.camera_overlay.set_visible(False)
         return False
 
+    # -- pinch to point ---------------------------------------------------------
+    # Tuned against how MediaPipe reports a hand rather than picked at random:
+    # PINCH_ON/PINCH_OFF are thumb-to-index distance as a fraction of the
+    # hand's own size, with a gap between them so a hand hovering near the
+    # threshold doesn't rattle between clicking and not. The dead zone crops
+    # the edges of the camera's view, because the far edges of the frame are
+    # both hard to reach and where tracking gets least reliable.
+    PINCH_ON = 0.38
+    PINCH_OFF = 0.55
+    POINT_SMOOTHING = 0.45   # 0 = no movement, 1 = no smoothing at all
+    POINT_DEAD_ZONE = 0.12   # fraction of the frame ignored at each edge
+    PINCH_CLICK_COOLDOWN_S = 0.6
+
     def on_camera_hand_frame(self, hands_xy):
         GLib.idle_add(self.camera_overlay.set_hands, hands_xy)
+        if self._pinch_cursor_armed:
+            self._drive_pointer_from_hand(hands_xy)
+
+    def _drive_pointer_from_hand(self, hands_xy):
+        """Point with your index finger to move the cursor, pinch to click.
+
+        Runs on the camera thread. Nothing here blocks: the actual pointer
+        moves are handed to PointerDriver, which has a thread of its own.
+        """
+        if not hands_xy:
+            self._pinch_held = False
+            return
+        points = hands_xy[0]
+        if len(points) < 21:
+            return
+
+        wrist, thumb_tip = points[0], points[4]
+        index_tip, middle_mcp = points[8], points[9]
+        hand_size = math.dist(wrist, middle_mcp) or 0.001
+        pinch_distance = math.dist(thumb_tip, index_tip) / hand_size
+
+        # A gap between the on and off thresholds, so a hand resting near the
+        # boundary doesn't fire a stream of clicks.
+        if self._pinch_held:
+            if pinch_distance > self.PINCH_OFF:
+                self._pinch_held = False
+        elif pinch_distance < self.PINCH_ON:
+            self._pinch_held = True
+            now = time.monotonic()
+            if now - self._last_pinch_click >= self.PINCH_CLICK_COOLDOWN_S:
+                self._last_pinch_click = now
+                pointer_driver.request_click()
+                GLib.idle_add(self.camera_overlay.set_gesture_flash, "click")
+
+        # The camera sees a mirror image, so moving your hand right has to
+        # move the cursor right, not left.
+        span = 1.0 - 2 * self.POINT_DEAD_ZONE
+        x = (1.0 - index_tip[0] - self.POINT_DEAD_ZONE) / span
+        y = (index_tip[1] - self.POINT_DEAD_ZONE) / span
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+
+        if self._pointer_smoothed is None:
+            self._pointer_smoothed = (x, y)
+        else:
+            prev_x, prev_y = self._pointer_smoothed
+            k = self.POINT_SMOOTHING
+            self._pointer_smoothed = (prev_x + (x - prev_x) * k,
+                                      prev_y + (y - prev_y) * k)
+        pointer_driver.aim(*self._pointer_smoothed)
+
+        if pointer_driver._stop.is_set() and pointer_driver.last_error:
+            GLib.idle_add(self._disarm_pinch_cursor, pointer_driver.last_error)
+
+    def _arm_pinch_cursor(self):
+        """Turn on hand-pointing, asking for mouse consent first if needed."""
+        if self._pinch_cursor_armed:
+            return
+        if not screen_control.enabled:
+            # Same one-time confirmation any other pointer action needs. It
+            # has to be answered before a hand can move the real cursor.
+            self.confirm_label.set_text("Let Toby move the cursor with your hand?")
+            self._pending_confirm_purpose = "pinch_cursor"
+            self._show_confirm_dialog()
+            return
+        self._pinch_cursor_armed = True
+        self._pointer_smoothed = None
+        self._pinch_held = False
+        pointer_driver.last_error = ""
+        pointer_driver.start()
+        self.camera_overlay.set_visible(True)
+        self.camera_overlay.set_recording("Pointing: index finger moves the cursor, pinch to click")
+
+    def _disarm_pinch_cursor(self, reason=""):
+        self._pinch_cursor_armed = False
+        self._pointer_smoothed = None
+        self._pinch_held = False
+        pointer_driver.stop()
+        if reason:
+            self.camera_overlay.set_recording(reason)
+        return False
+
+    def _on_pinch_cursor_switch_toggled(self, widget, state):
+        SETTINGS["camera_pinch_cursor"] = bool(state)
+        toby_settings.save(SETTINGS)
+        if state:
+            if not self.camera.enabled:
+                self.camera_overlay.set_visible(True)
+                self.camera_overlay.set_recording("Turn on Camera Mode to use hand pointing")
+            self._arm_pinch_cursor()
+        else:
+            self._disarm_pinch_cursor("Hand pointing off")
+        return False
 
     def on_camera_state(self, state_str):
         GLib.idle_add(self._apply_camera_state, state_str)
@@ -4355,6 +4620,15 @@ class AssistantWindow(Gtk.Window):
         install_guard.grant_once()
         self.confirm_row.set_visible(False)
         self.input_shape_combine_region(None)
+        purpose = self._pending_confirm_purpose
+        self._pending_confirm_purpose = None
+        self.confirm_label.set_text("Control screen enable?")
+        if purpose == "pinch_cursor":
+            # This prompt came from the Camera Mode switch, not from an
+            # action waiting on a background thread, so nothing is blocked
+            # on the event — just carry on and arm it.
+            self._arm_pinch_cursor()
+            return
         self._confirm_result = True
         self._confirm_event.set()
 
@@ -4362,6 +4636,15 @@ class AssistantWindow(Gtk.Window):
         screen_control.deny()
         self.confirm_row.set_visible(False)
         self.input_shape_combine_region(None)
+        purpose = self._pending_confirm_purpose
+        self._pending_confirm_purpose = None
+        self.confirm_label.set_text("Control screen enable?")
+        if purpose == "pinch_cursor":
+            self.settings_pinch_cursor_switch.set_active(False)
+            SETTINGS["camera_pinch_cursor"] = False
+            toby_settings.save(SETTINGS)
+            self._disarm_pinch_cursor("Hand pointing needs mouse control")
+            return
         self._confirm_result = False
         self._confirm_event.set()
 

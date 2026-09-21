@@ -28,6 +28,8 @@ REPO_ROOT = _layer_shell_stub.install()
 from gi.repository import Gtk  # noqa: E402,F401
 
 import linux_agent_apple as app
+import toby_settings
+import knowledge
 
 print("import OK")
 
@@ -48,6 +50,8 @@ if win is not None:
         ("switch_nav(settings)", lambda: win.switch_nav("settings")),
         ("switch_nav(memories)", lambda: win.switch_nav("memories")),
         ("refresh_memory_graph", lambda: win.refresh_memory_graph()),
+        ("every memory graph layout", lambda: [
+            win.on_memory_layout_clicked(k) for k, _ in toby_settings.MEMORY_GRAPH_LAYOUTS]),
         ("refresh_study_plan_grid", lambda: win.refresh_study_plan_grid()),
         ("refresh_camera_gesture_list", lambda: win.refresh_camera_gesture_list()),
         ("refresh_study_helper_stats", lambda: win.refresh_study_helper_stats()),
@@ -96,6 +100,99 @@ if win is not None:
             handler(widget, cr)
         except Exception:
             errors.append(f"draw {name}: " + traceback.format_exc())
+
+# -- pinch to point, driven through the real hand-frame callback -----------
+if win is not None:
+    def hand(index_tip, thumb_tip=(0.9, 0.9)):
+        """A 21-point hand with the wrist and knuckle fixed, so the hand size
+        used for the pinch threshold is a known 0.2."""
+        points = [(0.5, 0.8)] * 21
+        points[0] = (0.5, 0.8)    # wrist
+        points[9] = (0.5, 0.6)    # middle knuckle -> hand size 0.2
+        points[4] = thumb_tip
+        points[8] = index_tip
+        return points
+
+    aimed = []
+    clicks = []
+    app.pointer_driver.aim = lambda x, y: aimed.append((x, y))
+    app.pointer_driver.request_click = lambda: clicks.append(True)
+    app.pointer_driver.start = lambda: None
+    app.pointer_driver.stop = lambda: None
+
+    try:
+        # nothing happens until it is armed
+        win._pinch_cursor_armed = False
+        win.on_camera_hand_frame([hand((0.5, 0.5))])
+        if aimed or clicks:
+            errors.append("hand pointing moved the cursor before being armed")
+
+        # arm it by hand, bypassing the consent prompt (covered separately)
+        app.screen_control.grant()
+        win._arm_pinch_cursor()
+        if not win._pinch_cursor_armed:
+            errors.append("arming hand pointing after consent did not take effect")
+
+        # a hand at the centre of the frame aims at the centre of the screen
+        win._pointer_smoothed = None
+        for _ in range(40):
+            win.on_camera_hand_frame([hand((0.5, 0.5))])
+        if not aimed:
+            errors.append("an armed, visible hand aimed the pointer nowhere")
+        else:
+            x, y = aimed[-1]
+            if not (0.45 < x < 0.55 and 0.45 < y < 0.55):
+                errors.append(f"a centred hand should aim at the centre, aimed at {(x, y)}")
+
+        # the camera image is mirrored: a hand on the left of the frame is the
+        # user's right hand side, and the cursor should follow the user
+        win._pointer_smoothed = None
+        for _ in range(40):
+            win.on_camera_hand_frame([hand((0.2, 0.5))])
+        mirrored_x = aimed[-1][0]
+        if mirrored_x < 0.6:
+            errors.append(f"pointing is not mirrored: frame x 0.2 aimed at {mirrored_x}")
+
+        # movement is smoothed rather than snapping straight to the target
+        win._pointer_smoothed = None
+        win.on_camera_hand_frame([hand((0.5, 0.5))])
+        first = aimed[-1]
+        win.on_camera_hand_frame([hand((0.5, 0.1))])
+        second = aimed[-1]
+        if abs(second[1] - first[1]) > 0.35:
+            errors.append("pointer movement is not being smoothed between frames")
+
+        # pinching clicks once, not once per frame
+        clicks.clear()
+        win._pinch_held = False
+        win._last_pinch_click = 0.0
+        for _ in range(10):
+            win.on_camera_hand_frame([hand((0.5, 0.5), thumb_tip=(0.5, 0.52))])
+        if len(clicks) != 1:
+            errors.append(f"a held pinch should click once, clicked {len(clicks)} times")
+
+        # opening the hand again re-arms the click
+        for _ in range(5):
+            win.on_camera_hand_frame([hand((0.5, 0.5), thumb_tip=(0.9, 0.9))])
+        if win._pinch_held:
+            errors.append("opening the hand did not release the pinch")
+
+        # no hand in view means no pointer movement
+        before = len(aimed)
+        win.on_camera_hand_frame([])
+        if len(aimed) != before:
+            errors.append("an empty frame still moved the pointer")
+
+        # turning it off stands everything down
+        win._disarm_pinch_cursor()
+        before = len(aimed)
+        win.on_camera_hand_frame([hand((0.5, 0.5))])
+        if len(aimed) != before:
+            errors.append("the pointer still moved after hand pointing was turned off")
+    except Exception:
+        errors.append("pinch to point: " + traceback.format_exc())
+    finally:
+        app.screen_control.deny()
 
 # pure-logic checks that need no widgets at all
 def expect(label, got, want):

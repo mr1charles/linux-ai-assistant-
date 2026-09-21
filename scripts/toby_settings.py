@@ -24,6 +24,9 @@ DEFAULTS = {
     "voice_rate": 165,                 # espeak-ng -s (words per minute)
     "voice_pitch": 50,                 # espeak-ng -p (0-99)
     "camera_mode_enabled": False,      # Camera Mode off by default — webcam access is opt-in
+    "camera_pinch_cursor": False,      # pointing with your hand moves the real cursor — needs the same
+                                        # one-time mouse-control confirmation as any other pointer action
+    "memory_graph_layout": "force",    # "force" | "radial" | "mindmap"
     "cloud_provider": "openai",        # only OpenAI is wired up for now
     "cloud_api_key": "",               # stored locally only — never committed, never sent anywhere but the provider
     "cloud_model": "gpt-4o",
@@ -32,6 +35,12 @@ DEFAULTS = {
 }
 
 GRADE_LEVELS = ["5th-6th", "7th-8th", "9th-10th", "11th-12th", "College"]
+
+MEMORY_GRAPH_LAYOUTS = [
+    ("force", "Force-directed"),
+    ("radial", "Radial"),
+    ("mindmap", "Mind map"),
+]
 
 RESPONSE_STYLE_PROMPTS = {
     "concise": "Keep replies short — a sentence or two — unless the user explicitly asks for more detail.",
