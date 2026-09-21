@@ -43,7 +43,7 @@ from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
 import cairo  # noqa: E402
 import requests  # noqa: E402
 
-from screen_control import ScreenControl, NeedsConfirmation
+from screen_control import ScreenControl, NeedsConfirmation, press_keys
 from screen_read import capture_screen_text
 import knowledge
 import study_notes
@@ -231,23 +231,15 @@ def close_active_window():
             return "Closed."
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
-    try:
-        subprocess.run(["ydotool", "key", "super+q"], check=False, timeout=2)
+    result = press_keys("super+q")
+    if result.startswith("Pressed"):
         return "Closed (via Super+Q simulation)."
-    except FileNotFoundError:
-        return "Couldn't close the window — neither hyprctl nor ydotool is available."
-    except subprocess.TimeoutExpired:
-        return "Close timed out — is ydotoold running? (systemctl --user status ydotool)"
+    return f"Couldn't close the window. {result}"
 
 
 def close_tab():
-    try:
-        subprocess.run(["ydotool", "key", "ctrl+w"], check=False, timeout=2)
-        return "Closed tab (Ctrl+W)."
-    except FileNotFoundError:
-        return "ydotool not available — can't close tab."
-    except subprocess.TimeoutExpired:
-        return "Close-tab timed out — is ydotoold running? (systemctl --user status ydotool)"
+    result = press_keys("ctrl+w")
+    return "Closed tab (Ctrl+W)." if result.startswith("Pressed") else result
 
 
 def read_emails(from_contains="", subject_contains="", count=5, query=""):
