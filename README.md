@@ -97,17 +97,27 @@ systemctl --user enable --now linux-toby
   - **Chat**: your conversation history for the session.
   - **Memories**: an interactive graph of facts it's learned about you —
     drag to pan, scroll to zoom, click a node to see it and delete it, or
-    add one by hand. "Export as Tree/Bubble Image" still renders the old
-    static images if you want a picture instead.
+    add one by hand. Three layouts, because they answer different
+    questions: **Force-directed** shows which parts of what Toby knows are
+    densely related, **Radial** gives each category a wedge so their sizes
+    are comparable at a glance, and **Mind map** lays categories out as
+    bands you can read straight down. Your choice is remembered. "Export as
+    Tree/Bubble Image" still renders the old static images if you want a
+    picture instead.
   - **Settings**: response style (concise/balanced/detailed), a toggle for
     whether it remembers facts from chat at all, a toggle for Dynamic
     Island notifications, an accent color, and an Ollama model override —
     all saved to `settings.json`.
 - **A pill at the top of the screen** (the "Dynamic Island") appears while
-  Toby is working in the background — thinking, reading your screen, or
-  when it has a reply ready and the panel is closed. **Click** it to bring
-  the panel forward; **double-click** it to open a task-manager overlay
-  with a live step tracker, elapsed time, and a real **Cancel** button.
+  Toby is working in the background — thinking, or reading your screen.
+  **Click** it to bring the panel forward; **double-click** it to open a
+  task-manager overlay with a live step tracker, elapsed time, and a real
+  **Cancel** button. When a reply finishes while the panel is closed it
+  becomes a card instead, showing the answer itself with four buttons:
+  **Open** brings the panel up with the reply in it, **Explain** asks Toby
+  to go into more detail, **Later** brings the same card back in five
+  minutes, and **Dismiss** drops it. It waits for you rather than timing
+  out.
 - **Escape** or the ✕ button closes the panel.
 - The first time in a session it needs to move your mouse, type/click, or
   install a package, it shows an inline **Yes/No** confirmation — nothing
@@ -148,14 +158,17 @@ systemctl --user enable --now linux-toby
 - **Voice Mode**: tap the mic button on the main bar to toggle continuous
   voice mode on/off, or **hold it down for push-to-talk** regardless of
   that setting. With wake-word mode on (the default — configurable in
-  Settings), say "computer" (or whatever `WAKE_WORD` is set to) before your
-  request; with it off, everything you say is treated as a command. A live
+  Settings), say **"toby"** (or whatever `WAKE_WORD` is set to) before your
+  request — "hey toby, how much evidence do I need for a text analysis
+  essay" works, and the leading "hey" is stripped before the model sees it.
+  With wake-word mode off, everything you say is treated as a command. A live
   waveform (genuinely driven by your mic's input level, not decorative) and
   transcript appear while it's listening, and Toby speaks replies back via
-  espeak-ng, sentence-by-sentence as they stream in for lower latency.
+  espeak-ng, sentence-by-sentence as they stream in for lower latency —
+  queued in order, so each sentence finishes before the next one starts.
   Talking over Toby while it's speaking genuinely interrupts it — it's not
-  just muted, the speech process is killed and it starts listening for your
-  new request. Voice/rate/pitch/wake-word are all configurable in Settings.
+  just muted, the speech process is killed, anything still queued is thrown
+  away, and it starts listening for your new request. Voice/rate/pitch/wake-word are all configurable in Settings.
   Worth knowing: Voice Mode does *not* do real acoustic emotion detection —
   "mood" still comes from the LLM reading the text of what you said, same
   as typed chat; building genuine audio-based emotion detection would need
@@ -189,10 +202,18 @@ systemctl --user enable --now linux-toby
   - "Gaze direction" (used for looking left/right toward things) is a
     coarse iris-position estimate, not proper eye-tracking — good enough
     for a rough left/right signal, not for precisely aiming at UI elements.
+  - **Hand pointing** (Settings → Camera Mode → "Point with your hand to
+    move the cursor") lets your index fingertip drive the real cursor, with
+    a pinch of thumb and index to click, so you can select things without
+    reaching for the trackpad. It's off by default, and the first time you
+    switch it on Toby asks for the same one-time mouse-control permission
+    any other pointer action needs — it does nothing until you say yes.
+    Turning Camera Mode off turns it off too. Movement is smoothed and the
+    outer edge of the camera's view is ignored, since that's both awkward
+    to reach and where tracking is least reliable.
   - Genuinely floating "holographic" menus that follow your hand in 3D
-    space aren't implemented; the one real piece of "spatial UI" here is
-    that a pinch-and-hold on your hand actually drags Toby's panel up and
-    down the screen in real time.
+    space aren't implemented. With hand pointing off, a pinch-and-hold
+    still drags Toby's panel up and down the screen in real time.
   - `mediapipe` is a hefty, sometimes finicky dependency — if it fails to
     install, `install.sh` still installs everything else and Camera Mode
     just reports itself unavailable instead of breaking the app. Newer
@@ -209,10 +230,14 @@ systemctl --user enable --now linux-toby
     a beat longer rather than flicking it.
 - **Smart mode**: an optional, off-by-default escape hatch to a cloud model
   (OpenAI only, for now) for requests the local model struggles with. Add
-  your API key in Settings → Cloud AI, flip "Enable cloud AI" on, then tap
-  the **Smart** button on the main bar whenever you want the *next*
-  message(s) to go to the cloud instead of local Ollama — it stays on until
-  you tap it again. A few things worth knowing:
+  your API key in Settings → Cloud AI and save, then tap the **Smart**
+  button on the main bar whenever you want the *next* message(s) to go to
+  the cloud instead of local Ollama — it stays on until you tap it again.
+  Saving a key is all the setup there is; Smart won't switch on without one
+  and says so rather than quietly falling back to the local model. There's
+  also a "use cloud automatically for voice requests" switch, for when you
+  want hands-free requests to be fast without thinking about it. A few
+  things worth knowing:
   - This is entirely opt-in and off by default — nothing leaves your
     machine unless you turn this on and press Smart yourself.
   - Your key is stored only in `settings.json` on your machine (already
@@ -249,12 +274,42 @@ systemctl --user enable --now linux-toby
 - General chat/questions — plain conversation, remembers the session and
   persists history/knowledge/notes across restarts
 
+## Speed
+
+Most of the wait before Toby says anything is the local model reading its
+own prompt, so that is where the effort went:
+
+- The system prompt is split in two. The large half holding the tool list
+  and the rules is byte-for-byte identical every time, so Ollama serves it
+  from its cached attention state instead of reprocessing it. Everything
+  that changes — the date, the focused window, saved facts and notes, your
+  settings — is appended after it. **If you add context of your own, put it
+  in the tail block**: anything volatile in the middle of the static half
+  throws the whole cached prefix away.
+- Saved facts and study notes are clipped to a character budget rather than
+  pasted in whole. They accumulate forever, and left unbounded they were
+  several times the size of the prompt itself.
+- The model is asked to stay resident between requests and warmed up at
+  startup, so the first thing you say after a break doesn't pay to load
+  several gigabytes off disk.
+
+If it's still slow, the two real levers are a lighter model (below) and
+Smart mode, which sends the request to a cloud model instead.
+
 ## Notes
 
 - `qwen2.5:7b-instruct` needs a decent GPU or ~8GB RAM for reasonable
   latency. On a lighter laptop, `ollama pull qwen2.5:1.5b` and set
   `OLLAMA_MODEL=qwen2.5:1.5b` in `.env` — it's less reliable at strict JSON
-  formatting, so tool-calling may misfire more often.
+  formatting, so tool-calling may misfire more often. A model set in
+  Settings applies everywhere, including fact extraction, quizzes,
+  flashcards and screen summaries.
+- Mouse and keyboard control need `ydotoold` running:
+  `systemctl --user enable --now ydotool.service`. Without it every
+  ydotool call hangs until it times out. Toby copes with both the current
+  ydotool argument syntax and the pre-1.0 one, and tells you which of the
+  two failed rather than reporting success for something that didn't
+  happen.
 - `espeak-ng` sounds robotic (voice mode only). For nicer offline TTS, look
   at `piper-tts` — heavier model but much more natural.
 - The layer-shell positioning was written for Hyprland; adjust margins in
@@ -264,6 +319,39 @@ systemctl --user enable --now linux-toby
   `~/linux-agent/` (`knowledge.json`, `study_notes.json`, `history.json`,
   `session_log.md`, `school_mode.json`, `settings.json`) — delete any of them to reset that
   part, or back them up like any other file.
+
+## Working on it
+
+```bash
+./tests/run.sh
+```
+
+Toby's windows are all layer-shell surfaces, so the app itself only really
+runs on a Wayland compositor. These checks cover the part that doesn't need
+one, which is most of the code, and they run anywhere GTK3 and Xvfb are
+installed:
+
+- every script byte-compiles
+- the speech queue, against a stand-in for espeak-ng
+- the ydotool key and click translation, against a stand-in ydotool, in
+  both argument syntaxes and with none installed
+- each Memories graph layout: nodes inside the view, spread out rather than
+  stacked, and the same picture twice running
+- the stylesheet, through the real GTK CSS parser, for ten accent colours
+  including malformed ones, plus a check that every class the code applies
+  exists in the sheet
+- the prompt: that its static half really is static, and that the context
+  budgets and history trimming hold
+- the whole widget tree, constructed against real GTK with GtkLayerShell
+  stubbed out, every custom Cairo widget drawn, and hand pointing driven
+  through the real camera callback
+
+What they can't cover is anchoring, margins, input regions and anything
+else that only means something to a live compositor — those still need a
+look on the real machine.
+
+`tests/run.sh` points `HOME` at a throwaway directory seeded with sample
+data, so it never reads or writes your real notes, history or settings.
 
 ## License
 
