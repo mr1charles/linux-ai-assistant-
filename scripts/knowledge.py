@@ -23,8 +23,27 @@ from pathlib import Path
 import requests
 
 KNOWLEDGE_PATH = Path.home() / "linux-agent" / "knowledge.json"
-OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "qwen2.5:7b-instruct"
+
+# These follow the same environment variables the main app uses, and the main
+# app calls configure() at startup so that an Ollama model chosen in Settings
+# applies here too. Before that, picking a lighter model to speed things up
+# left every background extraction still hitting the heavy default.
+import os  # noqa: E402
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
+
+
+def configure(url=None, model=None, keep_alive=None):
+    """Point this module at the same Ollama endpoint/model as the main app."""
+    global OLLAMA_URL, OLLAMA_MODEL, OLLAMA_KEEP_ALIVE
+    if url:
+        OLLAMA_URL = url
+    if model:
+        OLLAMA_MODEL = model
+    if keep_alive:
+        OLLAMA_KEEP_ALIVE = keep_alive
 
 EXTRACT_PROMPT = """You extract facts a user has explicitly stated about themselves.
 
@@ -75,6 +94,7 @@ def extract_and_store(user_message: str) -> list:
         ],
         "stream": False,
         "format": "json",
+        "keep_alive": OLLAMA_KEEP_ALIVE,
     }
     try:
         resp = requests.post(OLLAMA_URL, json=payload, timeout=30)

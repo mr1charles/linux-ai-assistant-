@@ -69,7 +69,16 @@ SESSION_LOG_PATH = REPO_DIR / "session_log.md"
 FPS_MS = 16  # ~60fps tick
 IDLE_TIMEOUT_S = 25  # how long with no interaction before it "falls asleep"
 
-SYSTEM_PROMPT_TEMPLATE = """Today's date is {today}. You are Little Toby, a task-doing desktop \
+# The prompt is deliberately split in two. Everything in SYSTEM_PROMPT_STATIC
+# is byte-for-byte identical on every request, which lets Ollama reuse the
+# cached attention state for it instead of reprocessing a couple of thousand
+# tokens each time. Everything that changes between requests — the date, the
+# focused window, saved facts and notes, the user's style settings — goes in
+# a block appended after it. This ordering is the single cheapest speed win
+# available on CPU-only hardware, where re-reading the prompt is most of the
+# wait. Putting anything volatile in the middle of the static half throws the
+# whole cached prefix away, so keep new context in the tail block.
+SYSTEM_PROMPT_STATIC = """You are Little Toby, a task-doing desktop \
 assistant running locally on Linux (Hyprland window manager). Your primary job is to actually \
 DO things via actions, not just describe them — when a message implies a desktop task ("open X",
 "send Y", "close this", "check my email", "install Z"), call the matching tool immediately rather
@@ -84,8 +93,6 @@ open_url just opens a blank results page without ever reading it, which helps no
 genuinely don't know, say so plainly in "reply" rather than opening something that can't answer
 it either. Respond with ONLY a JSON object, no prose, no markdown fences, shaped exactly like:
 {{"actions": [...], "reply": "...", "mood": "happy|neutral|concerned|excited"}}
-
-{context_block}
 
 "actions" is an ordered list of desktop commands (empty if just chatting) — always nest it
 inside actions, even for a single action. Each is one of:
@@ -161,6 +168,31 @@ Rules:
   calls). Days with no schedule set are simply inactive for auto-detection.
 - If you don't have a tool for something, say so plainly instead of inventing one.
 """
+
+# The block above is still written with doubled braces from the days when it
+# was a format template. Unescape it once here, not on every request.
+SYSTEM_PROMPT_STATIC = SYSTEM_PROMPT_STATIC.format()
+
+# Hard ceilings on the parts of the prompt that grow without limit. Saved
+# facts and study notes accumulate forever, and on CPU-only hardware every
+# extra thousand characters of prompt is felt directly as a longer wait
+# before the first word appears.
+MAX_FACTS_CHARS = 900
+MAX_NOTES_CHARS = 1400
+MAX_HISTORY_TURNS = 8
+MAX_HISTORY_MESSAGE_CHARS = 700
+
+# Ask Ollama to keep the model resident between requests. The default is to
+# unload after five minutes idle, which means the first thing said after a
+# short break pays to load several gigabytes from disk again — by far the
+# worst latency in ordinary use, and entirely avoidable.
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
+
+# Replies are a few sentences plus a short action list. Capping the output
+# stops a model that starts rambling from holding the turn open for minutes,
+# and low temperature keeps tool-call JSON well formed.
+OLLAMA_OPTIONS = {"temperature": 0.2, "top_p": 0.9, "num_predict": 600}
+
 
 # ---------------------------------------------------------------------------
 # Tool implementations
@@ -498,40 +530,169 @@ def extract_partial_reply(raw):
     m = _REPLY_FIELD_RE.search(raw)
     if not m:
         return None
-    text = m.group(1)
-    return text.replace('\\n', '\n').replace('\\"', '"').replace('\\\\', '\\')
+    return _unescape_json_string(m.group(1))
 
 
-def _build_system_content():
-    today = datetime.date.today().strftime("%B %d, %Y")
-    facts_context = knowledge.get_facts_summary()
-    notes_context = study_notes.get_notes_summary()
-    active_window = get_active_window_context()
+_JSON_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+                 '"': '"', "\\": "\\", "/": "/"}
+
+
+def _unescape_json_string(text):
+    """Decode JSON string escapes in one left-to-right pass.
+
+    Doing it as a series of str.replace calls gets the order wrong: an
+    escaped backslash followed by an "n" would first be read as a newline,
+    so a Windows path or a regex in a reply came out mangled.
+    """
+    out = []
+    i = 0
+    length = len(text)
+    while i < length:
+        ch = text[i]
+        if ch != "\\" or i + 1 >= length:
+            out.append(ch)
+            i += 1
+            continue
+        nxt = text[i + 1]
+        if nxt == "u" and i + 5 < length:
+            try:
+                out.append(chr(int(text[i + 2:i + 6], 16)))
+                i += 6
+                continue
+            except ValueError:
+                pass
+        out.append(_JSON_ESCAPES.get(nxt, nxt))
+        i += 2
+    return "".join(out)
+
+
+def _clip(text, limit, what):
+    """Trim a context block to a character budget, keeping the most recent
+    lines, and say so rather than silently dropping things."""
+    if not text or len(text) <= limit:
+        return text
+    lines = text.split("\n")
+    header, body = lines[0], lines[1:]
+    kept = []
+    used = len(header)
+    for line in reversed(body):
+        if used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept.reverse()
+    omitted = len(body) - len(kept)
+    suffix = f"\n({omitted} older {what} not shown)" if omitted else ""
+    return "\n".join([header] + kept) + suffix
+
+
+def _build_volatile_context():
+    """Everything that can differ from one request to the next.
+
+    Appended after the static prompt so the static half stays byte-identical
+    and can be served from Ollama's cached prefix. Order inside this block
+    doesn't matter for caching, only that nothing volatile leaks earlier.
+    """
+    parts = ["Today's date is " + datetime.date.today().strftime("%B %d, %Y") + "."]
+
+    parts.append(toby_settings.style_prompt_line(SETTINGS))
+    grade = SETTINGS.get("grade_level", "9th-10th")
+    parts.append(f"When explaining or summarizing academic material, pitch it at a "
+                 f"{grade} level of complexity.")
+
     context_lines = []
+    active_window = get_active_window_context()
     if active_window:
         context_lines.append(f"Currently focused window: {active_window}")
     if recent_actions:
         recent_str = "; ".join(f"{a['tool']} ({a['summary']})" for a in recent_actions)
         context_lines.append(f"Actions taken earlier this session (most recent last): {recent_str}")
-    context_block = ("Ambient context (for your awareness, not something the user necessarily "
-                      "mentioned):\n" + "\n".join(context_lines)) if context_lines else ""
-    extra_context = "\n\n".join(c for c in [facts_context, notes_context] if c)
-    system_content = SYSTEM_PROMPT_TEMPLATE.format(today=today, context_block=context_block)
-    system_content += "\n\n" + toby_settings.style_prompt_line(SETTINGS)
-    grade = SETTINGS.get("grade_level", "9th-10th")
-    system_content += (f"\n\nWhen explaining or summarizing academic material, pitch it at a "
-                        f"{grade} level of complexity.")
-    system_content += ("\n\n" + extra_context if extra_context else "")
-    return system_content
+    if context_lines:
+        parts.append("Ambient context (for your awareness, not something the user necessarily "
+                     "mentioned):\n" + "\n".join(context_lines))
+
+    facts_context = _clip(knowledge.get_facts_summary(), MAX_FACTS_CHARS, "facts")
+    if facts_context:
+        parts.append(facts_context)
+    notes_context = _clip(study_notes.get_notes_summary(), MAX_NOTES_CHARS, "notes")
+    if notes_context:
+        parts.append(notes_context)
+
+    return "\n\n".join(parts)
+
+
+def _build_system_content():
+    return SYSTEM_PROMPT_STATIC + "\n\n" + _build_volatile_context()
+
+
+def _trim_history(history):
+    """The last few turns, with any single long message shortened.
+
+    One pasted error log in the history would otherwise be re-read in full on
+    every subsequent request for the rest of the session.
+    """
+    trimmed = []
+    for message in history[-MAX_HISTORY_TURNS:]:
+        content = message.get("content", "")
+        if len(content) > MAX_HISTORY_MESSAGE_CHARS:
+            content = content[:MAX_HISTORY_MESSAGE_CHARS] + " […trimmed]"
+        trimmed.append({"role": message.get("role", "user"), "content": content})
+    return trimmed
+
+
+def _active_model():
+    return SETTINGS.get("ollama_model") or OLLAMA_MODEL
+
+
+def apply_model_settings():
+    """Point the helper modules at whatever model/endpoint is configured now.
+
+    Called at startup and again whenever Settings are saved, so choosing a
+    lighter model for speed actually applies to fact extraction, note
+    extraction, quizzes, flashcards and screen summaries too — not just to
+    the conversation.
+    """
+    model = _active_model()
+    knowledge.configure(OLLAMA_URL, model, OLLAMA_KEEP_ALIVE)
+    study_notes.configure(OLLAMA_URL, model, OLLAMA_KEEP_ALIVE)
+
+
+def warm_up_model():
+    """Load the model into memory in the background at startup.
+
+    Ollama loads a model on first use and unloads it again after an idle
+    period. On CPU-only hardware that load is several seconds of silence
+    before the very first answer, which reads as the app being broken. This
+    asks for a zero-token generation, whose only purpose is the side effect
+    of having the model resident by the time it is first needed.
+    """
+    def worker():
+        try:
+            requests.post(
+                OLLAMA_URL.replace("/api/chat", "/api/generate"),
+                json={"model": _active_model(), "prompt": "", "stream": False,
+                      "keep_alive": OLLAMA_KEEP_ALIVE},
+                timeout=180,
+            )
+        except Exception:
+            pass  # Ollama may not be running yet; the first real request will say so
+
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def think(instruction, history, on_chunk=None, cancel_check=None):
     system_content = _build_system_content()
     messages = [{"role": "system", "content": system_content}]
-    messages.extend(history[-12:])
+    messages.extend(_trim_history(history))
     messages.append({"role": "user", "content": instruction})
-    model = SETTINGS.get("ollama_model") or OLLAMA_MODEL
-    payload = {"model": model, "messages": messages, "stream": bool(on_chunk), "format": "json"}
+    payload = {
+        "model": _active_model(),
+        "messages": messages,
+        "stream": bool(on_chunk),
+        "format": "json",
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": OLLAMA_OPTIONS,
+    }
 
     # 300s, not 120s — a longer, multi-step request (or a longer context from
     # facts/notes/ambient window info) can genuinely take a while to even
@@ -603,7 +764,7 @@ def think_cloud(instruction, history, on_chunk=None, cancel_check=None):
 
     system_content = _build_system_content()
     messages = [{"role": "system", "content": system_content}]
-    messages.extend(history[-12:])
+    messages.extend(_trim_history(history))
     messages.append({"role": "user", "content": instruction})
     model = SETTINGS.get("cloud_model") or "gpt-4o"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -2945,7 +3106,8 @@ class AssistantWindow(Gtk.Window):
         self.dashboard_labels["cpu"].set_text(f"{cpu:.0f}%" if cpu is not None else "…")
         mem = sample_mem_percent()
         self.dashboard_labels["mem"].set_text(f"{mem:.0f}%" if mem is not None else "…")
-        self.dashboard_labels["context"].set_text(f"{min(len(self.history), 12)}/12 messages")
+        self.dashboard_labels["context"].set_text(
+            f"{min(len(self.history), MAX_HISTORY_TURNS)}/{MAX_HISTORY_TURNS} messages")
         self.dashboard_labels["tools"].set_text(str(len(DISPATCH)))
         automations = []
         if study_mode_state.active:
@@ -3006,6 +3168,7 @@ class AssistantWindow(Gtk.Window):
             SETTINGS["accent_color"] = accent
             self.apply_accent_color(accent)
         SETTINGS["ollama_model"] = self.settings_model_entry.get_text().strip()
+        apply_model_settings()
         SETTINGS["grade_level"] = self.settings_grade_combo.get_active_id() or "9th-10th"
 
         voice_should_be_on = self.settings_voice_switch.get_active()
@@ -3903,6 +4066,8 @@ class AssistantWindow(Gtk.Window):
 
 
 def main():
+    apply_model_settings()
+    warm_up_model()
     ring = RingFlash()
     win = AssistantWindow(ring)
 

@@ -10,10 +10,30 @@ real material — same mechanism as the personal-facts knowledge graph.
 """
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
 NOTES_PATH = Path.home() / "linux-agent" / "study_notes.json"
+
+# Same story as knowledge.py: these had the endpoint and model hardcoded, so
+# an Ollama model chosen in Settings never reached quiz generation,
+# flashcards or note extraction. configure() is called by the main app at
+# startup.
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "30m")
+
+
+def configure(url=None, model=None, keep_alive=None):
+    """Point this module at the same Ollama endpoint/model as the main app."""
+    global OLLAMA_URL, OLLAMA_MODEL, OLLAMA_KEEP_ALIVE
+    if url:
+        OLLAMA_URL = url
+    if model:
+        OLLAMA_MODEL = model
+    if keep_alive:
+        OLLAMA_KEEP_ALIVE = keep_alive
 
 
 def _load():
@@ -116,16 +136,17 @@ def summarize_material(text: str, source_label: str = "Screen capture") -> dict:
     import requests
 
     payload = {
-        "model": "qwen2.5:7b-instruct",
+        "model": OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": SUMMARIZE_PROMPT},
             {"role": "user", "content": text[:4000]},
         ],
         "stream": False,
         "format": "json",
+        "keep_alive": OLLAMA_KEEP_ALIVE,
     }
     try:
-        resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=60)
         resp.raise_for_status()
         raw = resp.json()["message"]["content"].strip()
         raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -182,16 +203,17 @@ def _generate_from_notes(prompt_template, count, subject):
         return []
     notes_text = "\n".join(f"[{n['subject']}] {n['topic']}: {n['content']}" for n in notes[-60:])
     payload = {
-        "model": "qwen2.5:7b-instruct",
+        "model": OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": prompt_template.format(count=count)},
             {"role": "user", "content": notes_text},
         ],
         "stream": False,
         "format": "json",
+        "keep_alive": OLLAMA_KEEP_ALIVE,
     }
     try:
-        resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=60)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=60)
         resp.raise_for_status()
         raw = resp.json()["message"]["content"].strip()
         raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -244,16 +266,17 @@ def extract_and_store(user_message: str, screen_context: str = "") -> list:
         )
 
     payload = {
-        "model": "qwen2.5:7b-instruct",
+        "model": OLLAMA_MODEL,
         "messages": [
             {"role": "system", "content": EXTRACT_NOTE_PROMPT + context_note},
             {"role": "user", "content": user_message},
         ],
         "stream": False,
         "format": "json",
+        "keep_alive": OLLAMA_KEEP_ALIVE,
     }
     try:
-        resp = requests.post("http://localhost:11434/api/chat", json=payload, timeout=30)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=30)
         resp.raise_for_status()
         raw = resp.json()["message"]["content"].strip()
         raw = raw.removeprefix("```json").removeprefix("```").removesuffix("```").strip()

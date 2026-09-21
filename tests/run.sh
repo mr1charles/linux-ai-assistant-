@@ -27,6 +27,16 @@ else
     echo "   skipped: xvfb-run not installed"
 fi
 
+echo "== prompt assembly checks =="
+if command -v xvfb-run >/dev/null 2>&1; then
+    tmp_home="$(mktemp -d)"
+    mkdir -p "$tmp_home/linux-agent"
+    HOME="$tmp_home" xvfb-run -a "$PY" tests/test_prompt.py || status=1
+    rm -rf "$tmp_home"
+else
+    echo "   skipped: xvfb-run not installed"
+fi
+
 echo "== headless UI smoke test =="
 if command -v xvfb-run >/dev/null 2>&1; then
     # Point HOME at a throwaway directory so the test never reads or writes

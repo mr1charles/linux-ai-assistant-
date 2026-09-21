@@ -16,47 +16,17 @@ anything else that only means something to a live compositor.
 
 Run it with:  ./tests/run.sh
 """
-import os, sys, types, traceback
+import os
+import sys
+import traceback
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _layer_shell_stub  # noqa: E402
 
-import gi
-_real_require = gi.require_version
-def require_version(ns, ver):
-    if ns == "GtkLayerShell":
-        return
-    return _real_require(ns, ver)
-gi.require_version = require_version
+REPO_ROOT = _layer_shell_stub.install()
 
-gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk  # noqa
+from gi.repository import Gtk  # noqa: E402,F401
 
-class _Edge:
-    TOP = "top"; BOTTOM = "bottom"; LEFT = "left"; RIGHT = "right"
-class _Layer:
-    OVERLAY = "overlay"; TOP = "top"
-class _KeyboardMode:
-    NONE = "none"; ON_DEMAND = "on_demand"; EXCLUSIVE = "exclusive"
-
-stub = types.ModuleType("gi.repository.GtkLayerShell")
-stub.Edge = _Edge
-stub.Layer = _Layer
-stub.KeyboardMode = _KeyboardMode
-_margins = {}
-stub.init_for_window = lambda w: None
-stub.set_layer = lambda w, l: None
-stub.set_namespace = lambda w, n: None
-stub.set_anchor = lambda w, e, v: None
-stub.set_margin = lambda w, e, v: _margins.__setitem__((id(w), e), v)
-stub.get_margin = lambda w, e: _margins.get((id(w), e), 0)
-stub.set_keyboard_mode = lambda w, m: None
-stub.set_exclusive_zone = lambda w, z: None
-
-import gi.repository
-sys.modules["gi.repository.GtkLayerShell"] = stub
-gi.repository.GtkLayerShell = stub
-
-sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 import linux_agent_apple as app
 
 print("import OK")
