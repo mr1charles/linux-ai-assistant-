@@ -1216,6 +1216,7 @@ class DynamicIsland(Gtk.Window):
         self._on_expand = on_expand
         self._visible_target = False
         self._click_timeout_id = None
+        self._last_press_time = None
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
@@ -1255,24 +1256,36 @@ class DynamicIsland(Gtk.Window):
         self._pulse_t0 = time.monotonic()
         GLib.timeout_add(50, self._pulse_tick)
 
+    DOUBLE_CLICK_MS = 400
+
     def _on_button_press(self, widget, event):
-        if event.type == Gdk.EventType._2BUTTON_PRESS:
+        # GDK's own double-click detection (_2BUTTON_PRESS) does not fire
+        # reliably on this layer-shell setup, which is why double-clicking
+        # the island to open the task view did nothing. Time the gap between
+        # presses by hand instead — the same approach the face already uses.
+        if event.type != Gdk.EventType.BUTTON_PRESS:
+            return False
+        now_ms = event.time
+        previous = self._last_press_time
+        self._last_press_time = now_ms
+        if previous is not None and 0 <= now_ms - previous <= self.DOUBLE_CLICK_MS:
             if self._click_timeout_id:
                 GLib.source_remove(self._click_timeout_id)
                 self._click_timeout_id = None
+            self._last_press_time = None
             self._on_expand()
-        elif event.type == Gdk.EventType.BUTTON_PRESS:
-            # debounce: wait briefly to see if this becomes a double-click before
-            # treating it as a plain single click
-            if self._click_timeout_id:
-                GLib.source_remove(self._click_timeout_id)
+            return False
 
-            def fire_single():
-                self._click_timeout_id = None
-                self._on_click()
-                return False
+        # Hold the single click briefly in case a second one follows.
+        if self._click_timeout_id:
+            GLib.source_remove(self._click_timeout_id)
 
-            self._click_timeout_id = GLib.timeout_add(200, fire_single)
+        def fire_single():
+            self._click_timeout_id = None
+            self._on_click()
+            return False
+
+        self._click_timeout_id = GLib.timeout_add(self.DOUBLE_CLICK_MS, fire_single)
         return False
 
     def _draw_dot(self, widget, cr):
@@ -3114,6 +3127,14 @@ class AssistantWindow(Gtk.Window):
             automations.append("Study Mode ON")
         if self.school_scheduled_active:
             automations.append("School schedule active")
+        if self.smart_mode_active:
+            automations.append(f"Smart mode ON ({SETTINGS.get('cloud_model', 'cloud')})")
+        elif SETTINGS.get("voice_auto_cloud") and SETTINGS.get("cloud_api_key", "").strip():
+            automations.append("Voice requests use cloud")
+        if self.voice.enabled:
+            automations.append("Voice Mode listening")
+        if self.camera.enabled:
+            automations.append("Camera Mode on")
         self.dashboard_labels["automations"].set_text(", ".join(automations) if automations else "None")
         self.dashboard_labels["today"].set_text(str(count_todays_sessions()))
         return True  # keep repeating on the periodic timer
@@ -3483,11 +3504,28 @@ class AssistantWindow(Gtk.Window):
 
     # -- Camera Mode --------------------------------------------------------------
     def on_smart_toggled(self, widget):
-        self.smart_mode_active = widget.get_active()
-        if self.smart_mode_active and not SETTINGS.get("cloud_api_key", "").strip():
-            self.answer.set_text("Smart mode needs an API key set in Settings first.")
-            self.answer.set_visible(True)
-            self.answer.show()
+        wants_on = widget.get_active()
+        if wants_on and not SETTINGS.get("cloud_api_key", "").strip():
+            # Don't leave the button looking switched on while every request
+            # quietly goes to the local model anyway. Switch it back and say
+            # why — the state the user can see should be the state that is
+            # actually in effect.
+            self.smart_mode_active = False
+            widget.handler_block_by_func(self.on_smart_toggled)
+            widget.set_active(False)
+            widget.handler_unblock_by_func(self.on_smart_toggled)
+            self._show_notice("Smart mode needs an API key. Add one under "
+                              "Settings, Cloud AI, then try again.")
+            return
+        self.smart_mode_active = wants_on
+        self._show_notice("Smart mode on — messages go to your cloud model."
+                          if wants_on else "Smart mode off — back to the local model.")
+
+    def _show_notice(self, text):
+        """Put a short message in the answer line, where the user is looking."""
+        self.answer.set_text(text)
+        self.answer.set_visible(True)
+        self.answer.show()
 
     def on_camera_button_clicked(self, *_a):
         new_state = not SETTINGS.get("camera_mode_enabled", False)
