@@ -2818,6 +2818,9 @@ class AssistantWindow(Gtk.Window):
 
         self.school_mode_config = school_mode.load_config()
         self.school_scheduled_active = False
+        self._adaptive_check_running = False
+        self._today_count = 0
+        self._today_count_at = 0.0
 
         GtkLayerShell.init_for_window(self)
         GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
@@ -3148,11 +3151,11 @@ class AssistantWindow(Gtk.Window):
         export_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         export_tree_btn = Gtk.Button(label="Export as Tree Image")
         export_tree_btn.get_style_context().add_class("apple-agent-panel-button")
-        export_tree_btn.connect("clicked", lambda *_: knowledge.render_tree())
+        export_tree_btn.connect("clicked", lambda *_: self._export_graph_image(knowledge.render_tree))
         export_row.pack_start(export_tree_btn, False, False, 0)
         export_bubbles_btn = Gtk.Button(label="Export as Bubble Image")
         export_bubbles_btn.get_style_context().add_class("apple-agent-panel-button")
-        export_bubbles_btn.connect("clicked", lambda *_: knowledge.render_bubbles())
+        export_bubbles_btn.connect("clicked", lambda *_: self._export_graph_image(knowledge.render_bubbles))
         export_row.pack_start(export_bubbles_btn, False, False, 0)
         memories_page.pack_start(export_row, False, False, 0)
 
@@ -3695,14 +3698,45 @@ class AssistantWindow(Gtk.Window):
         if self.camera.enabled:
             automations.append("Camera Mode on")
         self.dashboard_labels["automations"].set_text(", ".join(automations) if automations else "None")
-        self.dashboard_labels["today"].set_text(str(count_todays_sessions()))
+        self.dashboard_labels["today"].set_text(str(self._todays_message_count()))
         return True  # keep repeating on the periodic timer
+
+    def _todays_message_count(self):
+        """How many exchanges happened today, counted sparingly.
+
+        This reads the whole session log, and the Dashboard refreshes every
+        two seconds. Recounting that often is pointless file I/O on the GTK
+        thread for a number that barely moves.
+        """
+        now = time.monotonic()
+        if now - getattr(self, "_today_count_at", 0.0) > 30:
+            self._today_count = count_todays_sessions()
+            self._today_count_at = now
+        return getattr(self, "_today_count", 0)
 
     # -- Memories ---------------------------------------------------------------
     def refresh_memory_graph(self):
         layout = SETTINGS.get("memory_graph_layout", "force")
         data = knowledge.get_graph_data(layout)
         self.memory_graph.load_data(data["nodes"], data["edges"])
+
+    def _export_graph_image(self, render):
+        """Render one of the static graph images and open it.
+
+        Drawing it goes through matplotlib and writing a PNG, which takes
+        long enough to be noticed. Doing that in the button handler locked
+        the interface up until the picture appeared.
+        """
+        self.memory_detail_label.set_text("Rendering the image…")
+
+        def worker():
+            try:
+                message = render()
+            except Exception as e:
+                message = f"Couldn't render that: {e}"
+            GLib.idle_add(self.memory_detail_label.set_text, message)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_memory_layout_clicked(self, layout_key):
         """Switch between the three ways of arranging what Toby knows.
@@ -3849,13 +3883,28 @@ class AssistantWindow(Gtk.Window):
     def check_school_adaptive(self):
         if not self.school_mode_config.get("adaptive_enabled"):
             return True
-        try:
-            text = capture_screen_text()
-            keywords = self.school_mode_config.get("adaptive_keywords", [])
-            if school_mode.screen_matches_keywords(text, keywords):
-                study_mode_state.enable()
-        except Exception as e:
-            print("SCHOOL MODE ADAPTIVE CHECK ERROR:", e, flush=True)
+        if study_mode_state.active:
+            return True  # already on; no reason to read the screen at all
+        if getattr(self, "_adaptive_check_running", False):
+            return True  # the previous one hasn't finished yet
+
+        # Screenshot plus OCR takes seconds. This runs on a timer on the GTK
+        # main thread, so doing it inline froze the whole interface every
+        # five minutes for no reason the user could see.
+        self._adaptive_check_running = True
+        keywords = self.school_mode_config.get("adaptive_keywords", [])
+
+        def worker():
+            try:
+                text = capture_screen_text()
+                if school_mode.screen_matches_keywords(text, keywords):
+                    GLib.idle_add(study_mode_state.enable)
+            except Exception as e:
+                print("SCHOOL MODE ADAPTIVE CHECK ERROR:", e, flush=True)
+            finally:
+                self._adaptive_check_running = False
+
+        threading.Thread(target=worker, daemon=True).start()
         return True
 
     # -- Study Mode: helper button actions, each a single explicit click ------
@@ -4326,6 +4375,10 @@ class AssistantWindow(Gtk.Window):
             self.refresh_camera_gesture_list()
             return False
         if name.startswith("__pinch_drag__:"):
+            if self._pinch_cursor_armed:
+                # a pinch means "click" while hand pointing is on; it must not
+                # also drag the panel around
+                return False
             _tag, x_str, y_str = name.split(":")
             if self.get_visible():
                 try:
