@@ -25,7 +25,26 @@ import _layer_shell_stub  # noqa: E402
 
 REPO_ROOT = _layer_shell_stub.install()
 
-from gi.repository import Gtk  # noqa: E402,F401
+from gi.repository import GLib, Gtk  # noqa: E402,F401
+
+# GTK reports misuse of its own API by logging a warning and carrying on, so
+# a widget added to two parents, or a property set on the wrong thing, shows
+# up as a line on stderr that is easy to scroll past. Collect those and treat
+# them as failures — they are real mistakes, just quiet ones.
+gtk_complaints = []
+
+
+def _collect_gtk_log(domain, level, message, _user_data=None):
+    gtk_complaints.append(f"{domain}: {message}")
+
+
+for _domain in ("Gtk", "Gdk", "GLib", "GLib-GObject", "Pango", "cairo"):
+    GLib.log_set_handler(
+        _domain,
+        GLib.LogLevelFlags.LEVEL_CRITICAL | GLib.LogLevelFlags.LEVEL_WARNING,
+        _collect_gtk_log,
+        None,
+    )
 
 import linux_agent_apple as app
 import toby_settings
@@ -194,6 +213,58 @@ if win is not None:
     finally:
         app.screen_control.deny()
 
+# -- the Yes/No row is shared, and must never strand a waiting thread ------
+if win is not None:
+    try:
+        app.screen_control.deny()
+
+        # An action that needs consent blocks a background thread on this
+        # event until the row is answered.
+        win._action_confirm_pending = True
+        win._confirm_event.clear()
+
+        # Meanwhile the user flips the hand-pointing switch. It must not take
+        # the question over, because the blocked thread is waiting on it.
+        win._arm_pinch_cursor()
+        if win._pending_confirm_purpose == "pinch_cursor":
+            errors.append("hand pointing hijacked a confirmation an action was waiting on")
+
+        win.on_confirm_yes()
+        if not win._confirm_event.is_set():
+            errors.append("answering the confirmation left the waiting thread blocked")
+        if win._confirm_result is not True:
+            errors.append("answering yes did not record a yes")
+
+        # And with nothing waiting, the same row does ask for hand pointing.
+        app.screen_control.deny()
+        win._action_confirm_pending = False
+        win._pinch_cursor_armed = False
+        win._arm_pinch_cursor()
+        if win._pending_confirm_purpose != "pinch_cursor":
+            errors.append("hand pointing did not ask for mouse permission")
+        if win._pinch_cursor_armed:
+            errors.append("hand pointing armed itself before permission was given")
+
+        win.on_confirm_no()
+        if win._pinch_cursor_armed:
+            errors.append("hand pointing armed itself after permission was refused")
+        if win.settings_pinch_cursor_switch.get_active():
+            errors.append("refusing permission left the hand-pointing switch on")
+
+        # saying yes to that same question does arm it
+        win._pinch_cursor_armed = False
+        win._arm_pinch_cursor()
+        win.on_confirm_yes()
+        if not win._pinch_cursor_armed:
+            errors.append("granting permission did not arm hand pointing")
+        win._disarm_pinch_cursor()
+    except Exception:
+        errors.append("shared confirmation row: " + traceback.format_exc())
+    finally:
+        app.screen_control.deny()
+        win._action_confirm_pending = False
+        win._pending_confirm_purpose = None
+
 # -- the Dynamic Island's notification card --------------------------------
 if win is not None:
     try:
@@ -264,6 +335,9 @@ expect("parse fenced json",
        app._parse_llm_json_reply('```json\n{"reply":"hi"}\n```')["reply"], "hi")
 expect("parse garbage falls back to text",
        app._parse_llm_json_reply("not json at all")["reply"], "not json at all")
+
+for complaint in gtk_complaints:
+    errors.append("GTK complained: " + complaint)
 
 if errors:
     print(f"\n{len(errors)} PROBLEM(S):\n")

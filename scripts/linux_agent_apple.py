@@ -377,6 +377,9 @@ class PointerDriver:
         self._thread = None
         self.last_error = ""
 
+    def stopped(self):
+        return self._stop.is_set()
+
     def start(self):
         if self._thread and self._thread.is_alive():
             return
@@ -1347,6 +1350,7 @@ class DynamicIsland(Gtk.Window):
         # to do about it — because a notification that can only be read is a
         # notification you have to go and act on somewhere else.
         column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        box.remove(inner)  # re-parent it into the column, not add it twice
         column.pack_start(inner, False, False, 0)
 
         self.card_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1364,7 +1368,6 @@ class DynamicIsland(Gtk.Window):
         self.card_box.pack_start(self.card_actions, False, False, 0)
 
         column.pack_start(self.card_box, False, False, 0)
-        box.remove(inner)
         box.add(column)
         self.add(box)
 
@@ -2819,6 +2822,7 @@ class AssistantWindow(Gtk.Window):
         self.school_mode_config = school_mode.load_config()
         self.school_scheduled_active = False
         self._adaptive_check_running = False
+        self._action_confirm_pending = False
         self._today_count = 0
         self._today_count_at = 0.0
 
@@ -4253,7 +4257,7 @@ class AssistantWindow(Gtk.Window):
                                       prev_y + (y - prev_y) * k)
         pointer_driver.aim(*self._pointer_smoothed)
 
-        if pointer_driver._stop.is_set() and pointer_driver.last_error:
+        if pointer_driver.stopped() and pointer_driver.last_error:
             GLib.idle_add(self._disarm_pinch_cursor, pointer_driver.last_error)
 
     def _arm_pinch_cursor(self):
@@ -4261,6 +4265,14 @@ class AssistantWindow(Gtk.Window):
         if self._pinch_cursor_armed:
             return
         if not screen_control.enabled:
+            if self._action_confirm_pending:
+                # Something else is already waiting on the Yes/No row, and a
+                # background thread is blocked until it is answered. Don't
+                # replace that question with this one.
+                self.camera_overlay.set_visible(True)
+                self.camera_overlay.set_recording(
+                    "Answer the pending confirmation first, then turn hand pointing on again")
+                return
             # Same one-time confirmation any other pointer action needs. It
             # has to be answered before a hand can move the real cursor.
             self.confirm_label.set_text("Let Toby move the cursor with your hand?")
@@ -4598,6 +4610,7 @@ class AssistantWindow(Gtk.Window):
                     self.school_mode_config = school_mode.load_config()
             except NeedsConfirmation:
                 self._confirm_event.clear()
+                self._action_confirm_pending = True
                 GLib.idle_add(self._show_confirm_dialog)
                 self._confirm_event.wait()  # blocks this background thread only, never the UI
                 if not self._confirm_result:
@@ -4800,14 +4813,17 @@ class AssistantWindow(Gtk.Window):
         purpose = self._pending_confirm_purpose
         self._pending_confirm_purpose = None
         self.confirm_label.set_text("Control screen enable?")
-        if purpose == "pinch_cursor":
+        if purpose == "pinch_cursor" and not self._action_confirm_pending:
             # This prompt came from the Camera Mode switch, not from an
             # action waiting on a background thread, so nothing is blocked
             # on the event — just carry on and arm it.
             self._arm_pinch_cursor()
             return
+        self._action_confirm_pending = False
         self._confirm_result = True
         self._confirm_event.set()
+        if purpose == "pinch_cursor":
+            self._arm_pinch_cursor()
 
     def on_confirm_no(self, *_a):
         screen_control.deny()
@@ -4821,7 +4837,9 @@ class AssistantWindow(Gtk.Window):
             SETTINGS["camera_pinch_cursor"] = False
             toby_settings.save(SETTINGS)
             self._disarm_pinch_cursor("Hand pointing needs mouse control")
-            return
+            if not self._action_confirm_pending:
+                return
+        self._action_confirm_pending = False
         self._confirm_result = False
         self._confirm_event.set()
 
