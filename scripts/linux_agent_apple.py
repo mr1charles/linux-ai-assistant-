@@ -2945,6 +2945,7 @@ class AssistantWindow(Gtk.Window):
         status_map = {
             State.SLEEPING: "Sleeping", State.WAKING: "Waking up", State.IDLE: "Idle",
             State.LISTENING: "Listening", State.THINKING: "Thinking", State.RESPONDING: "Responding",
+            State.SPEAKING: "Speaking",
         }
         self.dashboard_labels["status"].set_text(status_map.get(self.face.state, "Idle"))
         self.dashboard_labels["task"].set_text(self.task_label_text or "None")
@@ -2967,6 +2968,14 @@ class AssistantWindow(Gtk.Window):
     def refresh_memory_graph(self):
         data = knowledge.get_graph_data()
         self.memory_graph.load_data(data["nodes"], data["edges"])
+
+    def _refresh_memories_if_showing(self):
+        """Called from the background bookkeeping thread after fact extraction.
+        Only redraws when the Memories page is actually on screen — no point
+        rebuilding a graph nobody is looking at."""
+        if self.expanded and self.content_stack.get_visible_child_name() == "memories":
+            self.refresh_memory_graph()
+        return False
 
     def on_memory_node_select(self, node):
         if node:
@@ -3392,7 +3401,7 @@ class AssistantWindow(Gtk.Window):
     def _cycle_nav_section(self):
         if not self.expanded:
             return
-        order = ["dashboard", "chat", "memories", "settings"]
+        order = list(self.nav_buttons.keys())
         current = self.content_stack.get_visible_child_name()
         next_key = order[(order.index(current) + 1) % len(order)] if current in order else "dashboard"
         self.switch_nav(next_key)
@@ -3559,7 +3568,10 @@ class AssistantWindow(Gtk.Window):
         def on_chunk(content):
             GLib.idle_add(self.update_streaming_answer, content)
             GLib.idle_add(self.update_thinking_raw, content)
-            if SETTINGS.get("voice_mode_enabled", False) and self.voice.enabled:
+            # Gate on the engine actually running, not on the saved setting —
+            # push-to-talk starts the engine without ever flipping the setting,
+            # so keying off the setting left held-mic replies silent.
+            if self.voice.enabled:
                 partial_reply = extract_partial_reply(content)
                 if partial_reply:
                     unspoken = partial_reply[self._voice_spoken_len:]
@@ -3714,7 +3726,7 @@ class AssistantWindow(Gtk.Window):
         self.thinking_content.set_visible(False)
         self._append_history_row(text, reply_text)
 
-        if SETTINGS.get("voice_mode_enabled", False) and self.voice.enabled and not self.task_cancelled:
+        if self.voice.enabled and not self.task_cancelled:
             unspoken_tail = reply_text[self._voice_spoken_len:].strip()
             if unspoken_tail:
                 self.voice.speak(unspoken_tail)
@@ -3730,24 +3742,39 @@ class AssistantWindow(Gtk.Window):
         self.history.append({"role": "user", "content": text})
         self.history.append({"role": "assistant", "content": reply_text})
 
-        try:
-            if SETTINGS.get("memory_enabled", True):
-                knowledge.extract_and_store(text)
-        except Exception as e:
-            print("KNOWLEDGE EXTRACT ERROR:", e, flush=True)
-        try:
-            if SETTINGS.get("memory_enabled", True):
-                study_notes.extract_and_store(text, screen_context=last_screen_context)
-        except Exception as e:
-            print("STUDY NOTE EXTRACT ERROR:", e, flush=True)
-        try:
-            save_history(self.history)
-        except Exception as e:
-            print("HISTORY SAVE ERROR:", e, flush=True)
-        try:
-            log_session(text, reply_text)
-        except Exception as e:
-            print("SESSION LOG ERROR:", e, flush=True)
+        # Everything below is bookkeeping the user is not waiting on, and two
+        # pieces of it (fact extraction and study-note extraction) are each a
+        # fresh blocking Ollama request. finish_response runs on the GTK main
+        # thread, so doing that here froze the whole UI for several seconds
+        # after every single reply, right as the answer appeared. It runs on a
+        # worker thread instead. Nothing in here touches a widget.
+        history_snapshot = list(self.history)
+        screen_context = last_screen_context
+        memory_enabled = SETTINGS.get("memory_enabled", True)
+
+        def persist_worker():
+            if memory_enabled:
+                try:
+                    knowledge.extract_and_store(text)
+                except Exception as e:
+                    print("KNOWLEDGE EXTRACT ERROR:", e, flush=True)
+                try:
+                    study_notes.extract_and_store(text, screen_context=screen_context)
+                except Exception as e:
+                    print("STUDY NOTE EXTRACT ERROR:", e, flush=True)
+            try:
+                save_history(history_snapshot)
+            except Exception as e:
+                print("HISTORY SAVE ERROR:", e, flush=True)
+            try:
+                log_session(text, reply_text)
+            except Exception as e:
+                print("SESSION LOG ERROR:", e, flush=True)
+            if memory_enabled:
+                # the Memories graph may have just gained a node
+                GLib.idle_add(self._refresh_memories_if_showing)
+
+        threading.Thread(target=persist_worker, daemon=True).start()
 
         GLib.timeout_add_seconds(6, self._back_to_idle)
         return False
@@ -3861,7 +3888,12 @@ class AssistantWindow(Gtk.Window):
         self.entry.set_sensitive(True)
         GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.ON_DEMAND)
         self.entry.grab_focus()
-        self.face.set_state(State.IDLE)
+        if self.face.state == State.WAKING:
+            # Only settle into idle if nothing has happened since. A voice
+            # command opens the panel and submits in the same breath, so by
+            # now the face is often already thinking — forcing idle here
+            # dropped it out of the thinking animation a third of a second in.
+            self.face.set_state(State.IDLE)
         self.input_shape_combine_region(None)
         return False
 

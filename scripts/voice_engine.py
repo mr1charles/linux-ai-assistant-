@@ -70,6 +70,12 @@ class VoiceEngine:
         self._push_to_talk_flag = threading.Event()
         self._model = None
 
+        # Speech is queued, not played immediately — see speak() for why.
+        self._speech_queue = queue.Queue()
+        self._speech_thread = None
+        self._speech_stop = threading.Event()
+        self._speech_generation = 0
+
     # -- lifecycle ------------------------------------------------------------
     def start(self):
         if self.enabled:
@@ -86,6 +92,7 @@ class VoiceEngine:
     def stop(self):
         self.enabled = False
         self._stop_flag.set()
+        self._speech_stop.set()
         self._kill_tts()
         if self.on_state:
             self.on_state("idle")
@@ -98,31 +105,100 @@ class VoiceEngine:
 
     # -- text-to-speech, with barge-in interruption support --------------------
     def speak(self, text):
+        """Queue a sentence to be spoken. Returns immediately.
+
+        The caller feeds this a sentence at a time as the model streams its
+        reply, so that Toby starts talking before the whole answer exists.
+        That only works if each sentence waits its turn: playing one
+        immediately would cut off the one still being spoken, and a reply
+        would come out as the first half-second of every sentence followed by
+        the last one in full. A queue plus one worker keeps them in order.
+        """
         if not text or not text.strip():
             return
-        self._kill_tts()
-        if self.on_state:
-            self.on_state("speaking")
-        with self._tts_lock:
+        self._ensure_speech_worker()
+        self._speech_queue.put((self._speech_generation, text))
+
+    def _ensure_speech_worker(self):
+        if self._speech_thread and self._speech_thread.is_alive():
+            return
+        self._speech_stop.clear()
+        self._speech_thread = threading.Thread(target=self._speech_worker, daemon=True)
+        self._speech_thread.start()
+
+    def _speech_worker(self):
+        was_speaking = False
+        while not self._speech_stop.is_set():
             try:
-                self._tts_proc = subprocess.Popen(
+                generation, text = self._speech_queue.get(timeout=0.3)
+            except queue.Empty:
+                if was_speaking and self._speech_queue.empty():
+                    # everything queued has been spoken — hand the mic back
+                    was_speaking = False
+                    if self.on_state:
+                        self.on_state("idle")
+                continue
+            if generation != self._speech_generation:
+                continue  # queued before an interrupt/stop — drop it
+            if not was_speaking:
+                was_speaking = True
+                if self.on_state:
+                    self.on_state("speaking")
+            proc = None
+            try:
+                proc = subprocess.Popen(
                     ["espeak-ng", "-v", self.voice, "-s", str(self.rate), "-p", str(self.pitch), text],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
             except FileNotFoundError:
-                self._tts_proc = None
                 if self.on_state:
                     self.on_state("error: espeak-ng not installed")
+                self._drain_queue()
+                was_speaking = False
+                continue
+            with self._tts_lock:
+                self._tts_proc = proc
+            try:
+                proc.wait()
+            except Exception:
+                pass
+            with self._tts_lock:
+                if self._tts_proc is proc:
+                    self._tts_proc = None
+
+    def _drain_queue(self):
+        while True:
+            try:
+                self._speech_queue.get_nowait()
+            except queue.Empty:
+                return
 
     def _kill_tts(self):
+        """Stop speaking right now and throw away anything still queued.
+
+        Used for barge-in (the user talking over Toby) and for stop(). The
+        generation counter makes sure a sentence that was already handed to
+        the worker before the interrupt is discarded rather than spoken
+        afterwards.
+        """
+        self._speech_generation += 1
+        self._drain_queue()
         with self._tts_lock:
             if self._tts_proc and self._tts_proc.poll() is None:
                 self._tts_proc.terminate()
             self._tts_proc = None
 
     def is_speaking(self) -> bool:
+        """True while Toby is talking OR still has queued sentences to say.
+
+        The audio loop uses this to avoid feeding Toby's own voice back into
+        the recognizer, so it has to stay true across the gap between two
+        queued sentences, not just while a process happens to be alive.
+        """
         with self._tts_lock:
-            return self._tts_proc is not None and self._tts_proc.poll() is None
+            if self._tts_proc is not None and self._tts_proc.poll() is None:
+                return True
+        return not self._speech_queue.empty()
 
     # -- main audio loop ---------------------------------------------------------
     def _run(self):
@@ -152,6 +228,7 @@ class VoiceEngine:
         loud_streak = 0
         awaiting_command = False
         state_reported = None
+        was_speaking = False
 
         try:
             stream_ctx = sd.RawInputStream(
@@ -185,8 +262,25 @@ class VoiceEngine:
                             awaiting_command = True
                     else:
                         loud_streak = 0
+                    if not was_speaking:
+                        # Whatever was half-recognized before Toby started
+                        # talking is not worth keeping; start the next
+                        # utterance from a clean slate. Reset() is missing on
+                        # older vosk builds, which is not worth failing over.
+                        try:
+                            rec.Reset()
+                        except Exception:
+                            pass
+                        was_speaking = True
                     continue
                 loud_streak = 0
+                if was_speaking:
+                    # Force the listening state to be announced again now that
+                    # Toby has stopped talking. Without this the reported state
+                    # is unchanged from before it spoke, so nothing is emitted
+                    # and the face stays stuck mid-sentence.
+                    was_speaking = False
+                    state_reported = None
 
                 push_to_talk = self._push_to_talk_flag.is_set()
                 listening_for_command = awaiting_command or push_to_talk or not self.wake_word_enabled

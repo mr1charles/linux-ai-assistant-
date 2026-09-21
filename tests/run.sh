@@ -14,6 +14,9 @@ status=0
 echo "== byte-compiling every script =="
 "$PY" -m py_compile scripts/*.py || status=1
 
+echo "== voice engine checks =="
+"$PY" tests/test_voice_engine.py || status=1
+
 echo "== GTK CSS parse check =="
 if command -v xvfb-run >/dev/null 2>&1; then
     xvfb-run -a "$PY" tests/css_check.py || status=1
