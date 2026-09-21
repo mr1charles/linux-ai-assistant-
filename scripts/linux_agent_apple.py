@@ -25,6 +25,7 @@ import json
 import math
 import os
 import re
+import zlib
 import subprocess
 import threading
 import time
@@ -1234,6 +1235,7 @@ class DynamicIsland(Gtk.Window):
 
         box = Gtk.EventBox()
         box.get_style_context().add_class("apple-agent-island")
+        box.get_style_context().add_class("apple-agent-surface")
         box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
         inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         inner.set_border_width(10)
@@ -1378,6 +1380,7 @@ class IslandExpanded(Gtk.Window):
 
         outer = Gtk.EventBox()
         outer.get_style_context().add_class("apple-agent-island-expanded")
+        outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_border_width(16)
         outer.add(box)
@@ -1502,6 +1505,7 @@ class CameraOverlay(Gtk.Window):
 
         outer = Gtk.EventBox()
         outer.get_style_context().add_class("apple-agent-island-expanded")
+        outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.set_border_width(10)
         outer.add(box)
@@ -1585,6 +1589,7 @@ class StudyHelper(Gtk.Window):
 
         outer = Gtk.EventBox()
         outer.get_style_context().add_class("apple-agent-study-helper")
+        outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_border_width(14)
         outer.add(box)
@@ -1707,6 +1712,7 @@ class StudyReviewWindow(Gtk.Window):
 
         outer = Gtk.EventBox()
         outer.get_style_context().add_class("apple-agent-island-expanded")
+        outer.get_style_context().add_class("apple-agent-surface")
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         self.box.set_border_width(18)
         outer.add(self.box)
@@ -1861,6 +1867,7 @@ class TopicDetailWindow(Gtk.Window):
 
         outer = Gtk.EventBox()
         outer.get_style_context().add_class("apple-agent-island-expanded")
+        outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
         box.set_border_width(18)
         outer.add(box)
@@ -1926,212 +1933,513 @@ class TopicDetailWindow(Gtk.Window):
 # ---------------------------------------------------------------------------
 # Main assistant window
 # ---------------------------------------------------------------------------
+# The look: one small design system, not a pile of one-off styles
+#
+# Everything visual comes from the tokens below. There are no ad-hoc colours
+# further down — a component picks a surface, an ink, a line and a radius
+# from this list, and that is why the pill, the sidebar, the island and the
+# study windows read as the same object rather than five things that happen
+# to be dark.
+#
+# The palette is deep space: a near-black with a blue cast rather than a
+# neutral grey, lifted one step at a time for each layer that sits closer to
+# the user. Text is a faintly blue white at three fixed weights, so "quiet"
+# always means the same thing in every panel. The rainbow belongs to the
+# wake ring and the face, which are drawn in Cairo, not here; the interface
+# around them stays out of their way.
+#
+# The sheet is generated rather than written out, because the accent colour
+# is a user setting. Changing it rebuilds this sheet, which keeps the
+# accented states at their designed contrast instead of layering a second,
+# weaker rule on top of the first.
+# ---------------------------------------------------------------------------
 
-CSS = b"""
-.apple-agent-panel {
-    background-color: rgba(26, 26, 30, 0.74);
-    border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 50px;
-    box-shadow: 0 10px 40px rgba(0,0,0,0.4), 0 1px 0 rgba(255,255,255,0.05) inset;
-}
-.apple-agent-sidebar-window {
-    background-color: rgba(18, 18, 22, 0.97);
-    border: 1px solid rgba(255,255,255,0.1);
-    border-radius: 18px;
-    box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 1px 0 rgba(255,255,255,0.05) inset;
-}
-.apple-agent-panel-hidden {
-    background-color: rgba(0, 0, 0, 0);
-    border-radius: 50px;
+# -- surfaces, darkest first; each step is one layer closer to the user -----
+SPACE_VOID = "#08090f"     # behind everything, and the shadow colour
+SPACE_BASE = "#0b0c17"     # the main pill
+SPACE_RAISED = "#0f1022"   # sidebar, island, study windows
+SPACE_CONTROL = "#191c33"  # a control at rest
+SPACE_CONTROL_HOVER = "#232746"
+SPACE_CONTROL_ACTIVE = "#2c3157"
+
+# -- ink, in three fixed weights --------------------------------------------
+INK_BRIGHT = "#f4f5ff"                   # headings, values, anything being read
+INK_NORMAL = "rgba(244, 245, 255, 0.78)"  # ordinary body text
+INK_QUIET = "rgba(244, 245, 255, 0.48)"   # labels, hints, metadata
+
+# -- hairlines ---------------------------------------------------------------
+LINE_SOFT = "rgba(255, 255, 255, 0.06)"
+LINE = "rgba(255, 255, 255, 0.11)"
+LINE_STRONG = "rgba(255, 255, 255, 0.20)"
+
+# -- meaning-carrying colours ------------------------------------------------
+TONE_OK = "#6fe6a8"
+TONE_WARN = "#f3c969"
+TONE_ALERT = "#ff8080"
+
+# -- type scale, in px -------------------------------------------------------
+TYPE_MICRO = 11   # metadata, elapsed time, hints
+TYPE_SMALL = 12   # labels, buttons
+TYPE_BODY = 13    # body text
+TYPE_LEAD = 15    # the input line and answers
+TYPE_TITLE = 16   # section headings
+
+# -- corner radii ------------------------------------------------------------
+RADIUS_CONTROL = 10
+RADIUS_CARD = 14
+RADIUS_PANEL = 20
+RADIUS_ISLAND = 26
+RADIUS_PILL = 999
+
+DEFAULT_ACCENT = "#5a8cff"
+
+
+def _rgb(hex_color):
+    """(r, g, b) from "#rrggbb", falling back to the default accent."""
+    text = str(hex_color or "").lstrip("#")
+    try:
+        return int(text[0:2], 16), int(text[2:4], 16), int(text[4:6], 16)
+    except (ValueError, IndexError):
+        return _rgb(DEFAULT_ACCENT)
+
+
+def _mix_with_white(hex_color, amount):
+    """Lighten a colour toward white — used for an accent's hover state."""
+    r, g, b = _rgb(hex_color)
+    return (round(r + (255 - r) * amount),
+            round(g + (255 - g) * amount),
+            round(b + (255 - b) * amount))
+
+
+def build_css(accent_hex=DEFAULT_ACCENT):
+    """Render the whole stylesheet for one accent colour."""
+    r, g, b = _rgb(accent_hex)
+    lr, lg, lb = _mix_with_white(accent_hex, 0.25)
+    accent = f"rgb({r}, {g}, {b})"
+    accent_hover = f"rgb({lr}, {lg}, {lb})"
+    accent_wash = f"rgba({r}, {g}, {b}, 0.18)"
+    accent_edge = f"rgba({r}, {g}, {b}, 0.45)"
+    accent_glow = f"rgba({r}, {g}, {b}, 0.40)"
+
+    return f"""
+/* ---------------------------------------------------------------------
+ * Base: anything inside one of Toby's windows inherits these, so a plain
+ * Gtk.Label or Gtk.Entry looks like it belongs here instead of falling
+ * through to whatever the system theme happens to be. Component rules
+ * below are deliberately placed after these and win on source order.
+ * --------------------------------------------------------------------- */
+.apple-agent-surface label {{
+    color: {INK_NORMAL};
+    font-size: {TYPE_BODY}px;
+}}
+.apple-agent-surface entry {{
+    color: {INK_BRIGHT};
+    background-color: {SPACE_CONTROL};
+    background-image: none;
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 7px 11px;
+    font-size: {TYPE_BODY}px;
+    caret-color: {INK_BRIGHT};
     box-shadow: none;
-}
-.apple-agent-entry {
-    background: transparent;
-    color: #f5f5f7;
+    transition: border 120ms ease-out, background-color 120ms ease-out;
+}}
+.apple-agent-surface entry:focus {{
+    border: 1px solid {accent_edge};
+    background-color: {SPACE_CONTROL_HOVER};
+}}
+.apple-agent-surface entry placeholder,
+.apple-agent-surface entry:disabled {{
+    color: {INK_QUIET};
+}}
+.apple-agent-surface button {{
+    color: {INK_NORMAL};
+    background-color: {SPACE_CONTROL};
+    background-image: none;
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 7px 14px;
+    font-size: {TYPE_SMALL}px;
+    text-shadow: none;
+    box-shadow: none;
+    transition: background-color 120ms ease-out, color 120ms ease-out, border 120ms ease-out;
+}}
+.apple-agent-surface button:hover {{
+    color: {INK_BRIGHT};
+    background-color: {SPACE_CONTROL_HOVER};
+    border: 1px solid {LINE_STRONG};
+}}
+.apple-agent-surface button:active {{
+    background-color: {SPACE_CONTROL_ACTIVE};
+}}
+.apple-agent-surface button:disabled {{
+    color: {INK_QUIET};
+    background-color: {SPACE_CONTROL};
+    border: 1px solid {LINE_SOFT};
+}}
+.apple-agent-surface combobox button,
+.apple-agent-surface combobox entry {{
+    font-size: {TYPE_SMALL}px;
+}}
+.apple-agent-surface switch {{
+    background-color: {SPACE_CONTROL};
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_PILL}px;
+}}
+.apple-agent-surface switch:checked {{
+    background-color: {accent};
+    border: 1px solid {accent_edge};
+}}
+.apple-agent-surface switch slider {{
+    background-color: {INK_BRIGHT};
+    border-radius: {RADIUS_PILL}px;
+}}
+.apple-agent-surface scrolledwindow,
+.apple-agent-surface flowbox,
+.apple-agent-surface stack,
+.apple-agent-surface box {{
+    background-color: transparent;
+}}
+.apple-agent-surface scrollbar {{
+    background-color: transparent;
     border: none;
-    font-size: 15px;
-    caret-color: #f5f5f7;
-    box-shadow: 0 0 8px rgba(150, 150, 255, 0.25);
+}}
+.apple-agent-surface scrollbar slider {{
+    background-color: {LINE_STRONG};
+    border: none;
+    border-radius: {RADIUS_PILL}px;
+    min-width: 6px;
+    min-height: 28px;
+}}
+.apple-agent-surface scrollbar slider:hover {{
+    background-color: {INK_QUIET};
+}}
+
+/* ---------------------------------------------------------------------
+ * Surfaces
+ * --------------------------------------------------------------------- */
+.apple-agent-panel {{
+    background-color: alpha({SPACE_BASE}, 0.82);
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_PILL}px;
+    padding: 2px 6px;
+    box-shadow: 0 12px 44px alpha({SPACE_VOID}, 0.62),
+                0 1px 0 rgba(255, 255, 255, 0.05) inset;
+}}
+.apple-agent-panel-hidden {{
+    background-color: transparent;
+    border-radius: {RADIUS_PILL}px;
+    box-shadow: none;
+}}
+.apple-agent-sidebar-window {{
+    background-color: alpha({SPACE_RAISED}, 0.985);
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_PANEL}px;
+    box-shadow: 0 24px 72px alpha({SPACE_VOID}, 0.78),
+                0 1px 0 rgba(255, 255, 255, 0.05) inset;
+}}
+.apple-agent-island {{
+    background-color: alpha({SPACE_RAISED}, 0.94);
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_ISLAND}px;
+    box-shadow: 0 10px 32px alpha({SPACE_VOID}, 0.6);
+}}
+.apple-agent-island-expanded,
+.apple-agent-study-helper {{
+    background-color: alpha({SPACE_RAISED}, 0.97);
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_PANEL}px;
+    box-shadow: 0 18px 52px alpha({SPACE_VOID}, 0.7);
+}}
+
+/* ---------------------------------------------------------------------
+ * The main pill
+ * --------------------------------------------------------------------- */
+.apple-agent-entry {{
+    background-color: transparent;
+    background-image: none;
+    color: {INK_BRIGHT};
+    border: none;
+    border-radius: 0;
+    padding: 6px 4px;
+    font-size: {TYPE_LEAD}px;
+    caret-color: {INK_BRIGHT};
+    box-shadow: none;
     transition: box-shadow 150ms ease-out;
-}
-.apple-agent-entry:focus {
+}}
+.apple-agent-entry:focus {{
     outline: none;
-    box-shadow: 0 0 18px rgba(150, 180, 255, 0.55), 0 0 6px rgba(255, 150, 200, 0.35);
-}
-.apple-agent-face-hit-target {
+    border: none;
+    background-color: transparent;
+    box-shadow: 0 2px 0 {accent_edge};
+}}
+.apple-agent-face-hit-target {{
     background-color: transparent;
     background-image: none;
     border: none;
     box-shadow: none;
-}
-.apple-agent-close {
-    color: rgba(245,245,247,0.55);
-    font-size: 13px;
-    min-width: 20px;
-    min-height: 20px;
-    padding: 0;
-    border-radius: 50%;
-    background: transparent;
-    transition: background 120ms ease-out, color 120ms ease-out;
-}
-.apple-agent-close:hover {
-    color: #f5f5f7;
-    background: rgba(255,255,255,0.16);
-}
-.apple-agent-close:active {
-    background: rgba(255,255,255,0.28);
-}
-.apple-agent-answer {
-    color: #f5f5f7;
-    font-size: 14px;
-}
-.apple-agent-thinking {
-    color: rgba(245,245,247,0.4);
-    font-size: 11px;
+}}
+.apple-agent-close {{
+    color: {INK_QUIET};
+    background-color: transparent;
+    background-image: none;
+    border: none;
+    border-radius: {RADIUS_PILL}px;
+    padding: 5px 9px;
+    min-width: 22px;
+    min-height: 22px;
+    font-size: {TYPE_SMALL}px;
+    box-shadow: none;
+    transition: background-color 120ms ease-out, color 120ms ease-out;
+}}
+.apple-agent-close:hover {{
+    color: {INK_BRIGHT};
+    background-color: rgba(255, 255, 255, 0.10);
+    border: none;
+}}
+.apple-agent-close:active,
+.apple-agent-close:checked {{
+    color: {INK_BRIGHT};
+    background-color: {accent_wash};
+    border: none;
+    box-shadow: 0 0 0 1px {accent_edge} inset;
+}}
+.apple-agent-answer {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_LEAD}px;
+    padding: 2px 4px;
+}}
+.apple-agent-thinking {{
+    color: {INK_QUIET};
+    font-size: {TYPE_MICRO}px;
     font-family: monospace;
-}
-.apple-agent-history-user {
-    color: rgba(245,245,247,0.55);
-    font-size: 13px;
-}
-.apple-agent-history-reply {
-    color: #f5f5f7;
-    font-size: 13px;
-}
-.apple-agent-badge {
-    color: #f5f5f7;
-    background: rgba(90, 140, 255, 0.35);
-    border-radius: 12px;
-    padding: 2px 10px;
-    font-size: 12px;
-    transition: background 120ms ease-out;
-}
-.apple-agent-badge:hover {
-    background: rgba(90, 140, 255, 0.5);
-}
-button.apple-agent-panel-button {
-    color: rgba(245,245,247,0.75);
-    font-size: 12px;
-    padding: 3px 10px;
-    border-radius: 10px;
-    background: rgba(255,255,255,0.06);
-    transition: background 120ms ease-out, color 120ms ease-out;
-}
-button.apple-agent-panel-button:hover {
-    color: #f5f5f7;
-    background: rgba(255,255,255,0.14);
-}
-.apple-agent-island {
-    background-color: rgba(20, 20, 24, 0.88);
-    border-radius: 22px;
-    border: 1px solid rgba(255,255,255,0.08);
-    box-shadow: 0 6px 24px rgba(0,0,0,0.45);
-}
-.apple-agent-island-label {
-    color: #f5f5f7;
-    font-size: 12px;
-}
-.apple-agent-island-expanded {
-    background-color: rgba(20, 20, 24, 0.92);
-    border-radius: 20px;
-    border: 1px solid rgba(255,255,255,0.08);
-    box-shadow: 0 10px 32px rgba(0,0,0,0.5);
-}
-.apple-agent-island-task {
-    color: #f5f5f7;
-    font-size: 13px;
+    padding: 0 4px;
+}}
+
+/* ---------------------------------------------------------------------
+ * Shared small parts
+ * --------------------------------------------------------------------- */
+.apple-agent-badge {{
+    color: {INK_BRIGHT};
+    background-color: {accent_wash};
+    border: 1px solid {accent_edge};
+    border-radius: {RADIUS_PILL}px;
+    padding: 3px 12px;
+    font-size: {TYPE_SMALL}px;
+}}
+button.apple-agent-panel-button {{
+    color: {INK_NORMAL};
+    background-color: {SPACE_CONTROL};
+    border: 1px solid {LINE};
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 7px 14px;
+    font-size: {TYPE_SMALL}px;
+    transition: background-color 120ms ease-out, color 120ms ease-out, border 120ms ease-out;
+}}
+button.apple-agent-panel-button:hover {{
+    color: {INK_BRIGHT};
+    background-color: {SPACE_CONTROL_HOVER};
+    border: 1px solid {LINE_STRONG};
+}}
+button.apple-agent-panel-button:active {{
+    background-color: {SPACE_CONTROL_ACTIVE};
+}}
+button.apple-agent-primary-button {{
+    color: {INK_BRIGHT};
+    background-color: {accent};
+    border: 1px solid {accent};
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 8px 16px;
+    font-size: {TYPE_SMALL}px;
     font-weight: bold;
-}
-.apple-agent-island-elapsed {
-    color: rgba(245,245,247,0.5);
-    font-size: 11px;
-}
-.apple-agent-step-done {
-    color: rgba(120, 220, 150, 0.9);
-    font-size: 12px;
-}
-.apple-agent-step-current {
-    color: #f5f5f7;
-    font-size: 12px;
-}
-.apple-agent-step-pending {
-    color: rgba(245,245,247,0.35);
-    font-size: 12px;
-}
-.apple-agent-step-error {
-    color: rgba(240, 110, 110, 0.9);
-    font-size: 12px;
-}
-.apple-agent-nav-sidebar {
-    background: rgba(15, 15, 18, 0.95);
-    border-right: 2px solid rgba(90, 140, 255, 0.35);
-}
-.apple-agent-nav-title {
-    color: rgba(245,245,247,0.4);
-    font-size: 10px;
+}}
+button.apple-agent-primary-button:hover {{
+    background-color: {accent_hover};
+    border: 1px solid {accent_hover};
+}}
+
+/* ---------------------------------------------------------------------
+ * Dynamic Island
+ * --------------------------------------------------------------------- */
+.apple-agent-island-label {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_SMALL}px;
+    padding: 0 2px;
+}}
+.apple-agent-island-task {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_TITLE}px;
+    font-weight: bold;
+}}
+.apple-agent-island-elapsed {{
+    color: {INK_QUIET};
+    font-size: {TYPE_MICRO}px;
+}}
+.apple-agent-step-done {{
+    color: {TONE_OK};
+    font-size: {TYPE_SMALL}px;
+}}
+.apple-agent-step-current {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_SMALL}px;
+    font-weight: bold;
+}}
+.apple-agent-step-pending {{
+    color: {INK_QUIET};
+    font-size: {TYPE_SMALL}px;
+}}
+.apple-agent-step-error {{
+    color: {TONE_ALERT};
+    font-size: {TYPE_SMALL}px;
+}}
+
+/* ---------------------------------------------------------------------
+ * Sidebar navigation
+ *
+ * This is deliberately high contrast. An earlier version rendered the
+ * selected item as a faint wash that was genuinely hard to see, so the
+ * selected state here carries three cues at once: a filled accent
+ * background, a brighter border, and bold text.
+ * --------------------------------------------------------------------- */
+.apple-agent-nav-sidebar {{
+    background-color: alpha({SPACE_VOID}, 0.85);
+    border-right: 1px solid {LINE};
+}}
+.apple-agent-nav-title {{
+    color: {INK_QUIET};
+    font-size: {TYPE_MICRO}px;
     font-weight: bold;
     letter-spacing: 1px;
-}
-button.apple-agent-nav-button {
-    color: rgba(245,245,247,0.85);
-    font-size: 14px;
-    padding: 10px 14px;
-    border-radius: 8px;
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.08);
-    transition: background 120ms ease-out, color 120ms ease-out;
-}
-button.apple-agent-nav-button:hover {
+    padding: 4px 8px;
+}}
+button.apple-agent-nav-button {{
+    color: {INK_NORMAL};
+    background-color: transparent;
+    background-image: none;
+    border: 1px solid transparent;
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 11px 14px;
+    font-size: {TYPE_BODY}px;
+    transition: background-color 120ms ease-out, color 120ms ease-out;
+}}
+button.apple-agent-nav-button:hover {{
+    color: {INK_BRIGHT};
+    background-color: {SPACE_CONTROL};
+    border: 1px solid {LINE};
+}}
+button.apple-agent-nav-button.nav-selected {{
     color: #ffffff;
-    background: rgba(255,255,255,0.16);
-    border: 1px solid rgba(255,255,255,0.2);
-}
-button.apple-agent-nav-button.nav-selected {
-    color: #ffffff;
-    background: rgba(90, 140, 255, 0.55);
-    border: 1px solid rgba(120, 160, 255, 0.8);
+    background-color: {accent};
+    border: 1px solid {accent_hover};
     font-weight: bold;
-}
-.apple-agent-dashboard-title {
-    color: rgba(245,245,247,0.55);
-    font-size: 12px;
-}
-.apple-agent-dashboard-value {
-    color: #f5f5f7;
-    font-size: 13px;
+    box-shadow: 0 2px 12px {accent_glow};
+}}
+button.apple-agent-nav-button.nav-selected:hover {{
+    background-color: {accent_hover};
+}}
+
+/* ---------------------------------------------------------------------
+ * Dashboard
+ * --------------------------------------------------------------------- */
+.apple-agent-section-heading {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_TITLE}px;
     font-weight: bold;
-}
-.apple-agent-study-helper {
-    background-color: rgba(20, 20, 24, 0.9);
-    border-radius: 18px;
-    border: 1px solid rgba(255,255,255,0.08);
-    box-shadow: 0 8px 28px rgba(0,0,0,0.45);
-}
-button.apple-agent-topic-card {
-    color: #ffffff;
-    font-size: 12px;
-    padding: 10px;
-    border-radius: 10px;
-    min-width: 130px;
-    min-height: 60px;
-}
-button.apple-agent-topic-none {
-    background: rgba(255,255,255,0.08);
-    border: 1px solid rgba(255,255,255,0.15);
-}
-button.apple-agent-topic-low {
-    background: rgba(220, 80, 80, 0.45);
-    border: 1px solid rgba(255, 110, 110, 0.6);
-}
-button.apple-agent-topic-mid {
-    background: rgba(220, 180, 60, 0.45);
-    border: 1px solid rgba(255, 210, 90, 0.6);
-}
-button.apple-agent-topic-high {
-    background: rgba(80, 200, 120, 0.45);
-    border: 1px solid rgba(110, 230, 150, 0.6);
-}
+    padding: 2px 0;
+}}
+.apple-agent-dashboard-title {{
+    color: {INK_QUIET};
+    font-size: {TYPE_SMALL}px;
+}}
+.apple-agent-dashboard-value {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_BODY}px;
+    font-weight: bold;
+}}
+.apple-agent-dashboard-row {{
+    background-color: alpha({SPACE_CONTROL}, 0.55);
+    border: 1px solid {LINE_SOFT};
+    border-radius: {RADIUS_CONTROL}px;
+    padding: 9px 12px;
+}}
+
+/* ---------------------------------------------------------------------
+ * Chat transcript
+ * --------------------------------------------------------------------- */
+.apple-agent-history-user {{
+    color: {INK_QUIET};
+    font-size: {TYPE_BODY}px;
+}}
+.apple-agent-history-reply {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_BODY}px;
+}}
+.apple-agent-history-row {{
+    background-color: alpha({SPACE_CONTROL}, 0.45);
+    border: 1px solid {LINE_SOFT};
+    border-left: 2px solid {accent_edge};
+    border-radius: {RADIUS_CARD}px;
+    padding: 11px 14px;
+}}
+
+/* ---------------------------------------------------------------------
+ * Study Plan topic cards
+ *
+ * Colour carries the proficiency tier, so each tier also differs in border
+ * weight — colour alone is not something to rely on.
+ * --------------------------------------------------------------------- */
+button.apple-agent-topic-card {{
+    color: {INK_BRIGHT};
+    font-size: {TYPE_SMALL}px;
+    padding: 14px 12px;
+    border-radius: {RADIUS_CARD}px;
+    min-width: 150px;
+    min-height: 74px;
+}}
+button.apple-agent-topic-none {{
+    background-color: {SPACE_CONTROL};
+    border: 1px solid {LINE};
+}}
+button.apple-agent-topic-none:hover {{
+    background-color: {SPACE_CONTROL_HOVER};
+}}
+button.apple-agent-topic-low {{
+    background-color: alpha({TONE_ALERT}, 0.22);
+    border: 1px solid alpha({TONE_ALERT}, 0.55);
+}}
+button.apple-agent-topic-low:hover {{
+    background-color: alpha({TONE_ALERT}, 0.32);
+}}
+button.apple-agent-topic-mid {{
+    background-color: alpha({TONE_WARN}, 0.20);
+    border: 1px solid alpha({TONE_WARN}, 0.55);
+}}
+button.apple-agent-topic-mid:hover {{
+    background-color: alpha({TONE_WARN}, 0.30);
+}}
+button.apple-agent-topic-high {{
+    background-color: alpha({TONE_OK}, 0.20);
+    border: 1px solid alpha({TONE_OK}, 0.55);
+}}
+button.apple-agent-topic-high:hover {{
+    background-color: alpha({TONE_OK}, 0.30);
+}}
 """
+
+
+CSS = build_css().encode()
+
+# The Cairo-drawn widgets (waveform, memory graph) can't read the stylesheet,
+# so the accent is mirrored here as plain floats and kept in step by
+# apply_accent_color(). Without this they stayed a fixed blue while the rest
+# of the interface followed the user's chosen colour.
+ACCENT_RGB = tuple(c / 255.0 for c in _rgb(DEFAULT_ACCENT))
+
+
+def set_accent_rgb(hex_color):
+    global ACCENT_RGB
+    ACCENT_RGB = tuple(c / 255.0 for c in _rgb(hex_color))
+
 
 
 # ---------------------------------------------------------------------------
@@ -2163,10 +2471,11 @@ class WaveformView(Gtk.DrawingArea):
     def on_draw(self, widget, cr):
         w, h = widget.get_allocated_width(), widget.get_allocated_height()
         bar_w = w / self.BARS
+        accent_r, accent_g, accent_b = ACCENT_RGB
         for i, level in enumerate(self.levels):
             bar_h = max(2, level * h)
             x = i * bar_w
-            cr.set_source_rgba(0.45, 0.75, 1.0, 0.35 + 0.5 * level)
+            cr.set_source_rgba(accent_r, accent_g, accent_b, 0.35 + 0.5 * level)
             cr.rectangle(x + 1, (h - bar_h) / 2, max(1, bar_w - 2), bar_h)
             cr.fill()
         return False
@@ -2222,7 +2531,10 @@ class MemoryGraphView(Gtk.DrawingArea):
 
     @staticmethod
     def _category_color(category):
-        hue = (hash(category) % 360) / 360.0
+        # zlib.crc32, not hash(): Python randomizes string hashing per
+        # process, so the whole graph came back in different colours after
+        # every restart and a category never had a colour you could learn.
+        hue = (zlib.crc32(str(category).encode("utf-8")) % 360) / 360.0
         i = int(hue * 6)
         f = hue * 6 - i
         s, v = 0.55, 0.85
@@ -2235,7 +2547,7 @@ class MemoryGraphView(Gtk.DrawingArea):
     def on_draw(self, widget, cr):
         w, h = widget.get_allocated_width(), widget.get_allocated_height()
         if not self.nodes:
-            cr.set_source_rgba(1, 1, 1, 0.4)
+            cr.set_source_rgba(0.96, 0.96, 1.0, 0.48)
             cr.select_font_face("sans-serif")
             cr.set_font_size(13)
             cr.move_to(16, 26)
@@ -2259,7 +2571,7 @@ class MemoryGraphView(Gtk.DrawingArea):
             cr_r, cr_g, cr_b = self._category_color(n["category"])
             is_sel = n["id"] == self.selected_id
             if is_sel:
-                cr.set_source_rgba(1, 1, 1, 0.9)
+                cr.set_source_rgba(*ACCENT_RGB, 1.0)
                 cr.arc(x, y, r + 4, 0, 2 * math.pi)
                 cr.set_line_width(2)
                 cr.stroke()
@@ -2352,20 +2664,21 @@ class AssistantWindow(Gtk.Window):
         self.set_default_size(1900, 60)
         self.set_size_request(1500, 50)
 
-        provider = Gtk.CssProvider()
-        provider.load_from_data(CSS)
+        self.css_provider = Gtk.CssProvider()
+        self.css_provider.load_from_data(CSS)
         Gtk.StyleContext.add_provider_for_screen(
-            screen, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            screen, self.css_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
         screen_control.get_screen_size = lambda: (screen.get_width(), screen.get_height())
 
         self.outer = Gtk.EventBox()
+        self.outer.get_style_context().add_class("apple-agent-surface")
         self.outer.get_style_context().add_class("apple-agent-panel-hidden")
         self.add(self.outer)
 
-        self.stage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        self.stage.set_border_width(8)
+        self.stage = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.stage.set_border_width(10)
         self.outer.add(self.stage)
 
         # -- input row: face + entry + close button -------------------------
@@ -2522,14 +2835,15 @@ class AssistantWindow(Gtk.Window):
         # rendering transparent.
         sidebar_outer = Gtk.EventBox()
         sidebar_outer.get_style_context().add_class("apple-agent-sidebar-window")
+        sidebar_outer.get_style_context().add_class("apple-agent-surface")
         self.sidebar_window.add(sidebar_outer)
 
         self.expanded_area = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
         sidebar_outer.add(self.expanded_area)
 
         self.nav_sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        self.nav_sidebar.set_size_request(170, -1)
-        self.nav_sidebar.set_border_width(10)
+        self.nav_sidebar.set_size_request(186, -1)
+        self.nav_sidebar.set_border_width(14)
         self.nav_sidebar.get_style_context().add_class("apple-agent-nav-sidebar")
         self.expanded_area.pack_start(self.nav_sidebar, False, False, 0)
 
@@ -2559,22 +2873,29 @@ class AssistantWindow(Gtk.Window):
             self.nav_buttons[key] = btn
 
         # --- Dashboard page --------------------------------------------------
-        dashboard_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        dashboard_page.set_border_width(14)
+        dashboard_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        dashboard_page.set_border_width(24)
+        dashboard_heading = Gtk.Label(label="Dashboard")
+        dashboard_heading.set_xalign(0)
+        dashboard_heading.get_style_context().add_class("apple-agent-section-heading")
+        dashboard_heading.set_margin_bottom(6)
+        dashboard_page.pack_start(dashboard_heading, False, False, 0)
         self.dashboard_labels = {}
         for stat_key, stat_title in [
             ("status", "AI Status"), ("task", "Current Task"), ("cpu", "CPU"),
             ("mem", "Memory"), ("context", "Context Window"), ("tools", "Active Tools"),
             ("automations", "Automations"), ("today", "Messages Today"),
         ]:
-            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            row.get_style_context().add_class("apple-agent-dashboard-row")
             title_lbl = Gtk.Label(label=stat_title)
             title_lbl.set_xalign(0)
             title_lbl.get_style_context().add_class("apple-agent-dashboard-title")
-            title_lbl.set_size_request(150, -1)
+            title_lbl.set_size_request(160, -1)
             row.pack_start(title_lbl, False, False, 0)
             value_lbl = Gtk.Label(label="—")
             value_lbl.set_xalign(0)
+            value_lbl.set_line_wrap(True)
             value_lbl.get_style_context().add_class("apple-agent-dashboard-value")
             row.pack_start(value_lbl, True, True, 0)
             dashboard_page.pack_start(row, False, False, 0)
@@ -2582,8 +2903,13 @@ class AssistantWindow(Gtk.Window):
         self.content_stack.add_titled(dashboard_page, "dashboard", "Dashboard")
 
         # --- Chat page (conversation history) --------------------------------
-        chat_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        chat_page.set_border_width(8)
+        chat_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        chat_page.set_border_width(24)
+        chat_heading = Gtk.Label(label="Chat")
+        chat_heading.set_xalign(0)
+        chat_heading.get_style_context().add_class("apple-agent-section-heading")
+        chat_heading.set_margin_bottom(6)
+        chat_page.pack_start(chat_heading, False, False, 0)
         self.history_scroller = Gtk.ScrolledWindow()
         self.history_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.history_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -2592,8 +2918,12 @@ class AssistantWindow(Gtk.Window):
         self.content_stack.add_titled(chat_page, "chat", "Chat")
 
         # --- Memories page (interactive graph) --------------------------------
-        memories_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
-        memories_page.set_border_width(8)
+        memories_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        memories_page.set_border_width(24)
+        memories_heading = Gtk.Label(label="Memories")
+        memories_heading.set_xalign(0)
+        memories_heading.get_style_context().add_class("apple-agent-section-heading")
+        memories_page.pack_start(memories_heading, False, False, 0)
         self.memory_graph = MemoryGraphView(on_select=self.on_memory_node_select)
         self.memory_graph.set_size_request(-1, 380)
         memories_page.pack_start(self.memory_graph, True, True, 0)
@@ -2644,8 +2974,12 @@ class AssistantWindow(Gtk.Window):
         self.content_stack.add_titled(memories_page, "memories", "Memories")
 
         # --- Study Plan page (proficiency grid) ---------------------------------
-        plan_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        plan_page.set_border_width(10)
+        plan_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        plan_page.set_border_width(24)
+        plan_heading = Gtk.Label(label="Study Plan")
+        plan_heading.set_xalign(0)
+        plan_heading.get_style_context().add_class("apple-agent-section-heading")
+        plan_page.pack_start(plan_heading, False, False, 0)
 
         plan_hint = Gtk.Label(
             label="Proficiency only ever moves when you actually take a quiz on a topic — "
@@ -2681,8 +3015,13 @@ class AssistantWindow(Gtk.Window):
         self.content_stack.add_titled(plan_page, "plan", "Study Plan")
 
         # --- Settings page -----------------------------------------------------
-        settings_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        settings_page.set_border_width(14)
+        settings_page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        settings_page.set_border_width(24)
+        settings_heading = Gtk.Label(label="Settings")
+        settings_heading.set_xalign(0)
+        settings_heading.get_style_context().add_class("apple-agent-section-heading")
+        settings_heading.set_margin_bottom(4)
+        settings_page.pack_start(settings_heading, False, False, 0)
 
         style_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         style_row.pack_start(Gtk.Label(label="Response style"), False, False, 0)
@@ -2734,7 +3073,7 @@ class AssistantWindow(Gtk.Window):
 
         voice_separator = Gtk.Label(label="Voice Mode")
         voice_separator.set_xalign(0)
-        voice_separator.get_style_context().add_class("apple-agent-island-task")
+        voice_separator.get_style_context().add_class("apple-agent-section-heading")
         settings_page.pack_start(voice_separator, False, False, 6)
 
         voice_switch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -2784,7 +3123,7 @@ class AssistantWindow(Gtk.Window):
 
         camera_separator = Gtk.Label(label="Camera Mode")
         camera_separator.set_xalign(0)
-        camera_separator.get_style_context().add_class("apple-agent-island-task")
+        camera_separator.get_style_context().add_class("apple-agent-section-heading")
         settings_page.pack_start(camera_separator, False, False, 6)
 
         camera_switch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -2836,7 +3175,7 @@ class AssistantWindow(Gtk.Window):
 
         cloud_separator = Gtk.Label(label="Cloud AI (optional)")
         cloud_separator.set_xalign(0)
-        cloud_separator.get_style_context().add_class("apple-agent-island-task")
+        cloud_separator.get_style_context().add_class("apple-agent-section-heading")
         settings_page.pack_start(cloud_separator, False, False, 6)
 
         cloud_note = Gtk.Label(
@@ -2903,11 +3242,15 @@ class AssistantWindow(Gtk.Window):
         settings_page.pack_start(self.settings_save_status, False, False, 0)
 
         settings_save_btn = Gtk.Button(label="Save Settings")
-        settings_save_btn.get_style_context().add_class("apple-agent-panel-button")
+        settings_save_btn.get_style_context().add_class("apple-agent-primary-button")
+        settings_save_btn.set_halign(Gtk.Align.START)
         settings_save_btn.connect("clicked", self.on_settings_save_clicked)
         settings_page.pack_start(settings_save_btn, False, False, 0)
 
-        self.content_stack.add_titled(settings_page, "settings", "Settings")
+        settings_scroller = Gtk.ScrolledWindow()
+        settings_scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        settings_scroller.add(settings_page)
+        self.content_stack.add_titled(settings_scroller, "settings", "Settings")
 
         self.content_stack.set_visible_child_name("chat")
         self.nav_buttons["chat"].get_style_context().add_class("nav-selected")
@@ -3224,24 +3567,26 @@ class AssistantWindow(Gtk.Window):
         GLib.timeout_add_seconds(3, lambda: self.settings_save_status.set_text("") or False)
 
     def apply_accent_color(self, hex_color):
-        if not hasattr(self, "_accent_provider"):
-            self._accent_provider = Gtk.CssProvider()
-            Gtk.StyleContext.add_provider_for_screen(
-                self.get_screen(), self._accent_provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1
-            )
+        """Rebuild the whole stylesheet around a new accent colour.
+
+        The accent used to be applied as a second, higher-priority provider
+        holding a couple of overrides. That quietly undid the contrast the
+        selected sidebar item was designed with, because the override was a
+        fainter wash than the rule it replaced. Regenerating the one sheet
+        keeps every accented state at its intended weight, and means a new
+        accented component never needs a second rule written for it.
+        """
         try:
-            h = hex_color.lstrip("#")
-            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-        except (ValueError, IndexError):
-            return  # malformed color — leave the current accent alone rather than crash
-        css = (
-            f"button.apple-agent-nav-button.nav-selected {{ background: rgba({r},{g},{b},0.27); color: #ffffff; }}\n"
-            f".apple-agent-badge {{ background: rgba({r},{g},{b},0.33); }}\n"
-        ).encode()
-        self._accent_provider.load_from_data(css)
+            self.css_provider.load_from_data(build_css(hex_color).encode())
+            set_accent_rgb(hex_color)
+            self.waveform.queue_draw()
+            self.memory_graph.queue_draw()
+        except Exception as e:
+            print("ACCENT COLOR ERROR:", e, flush=True)
 
     def _append_history_row(self, user_text, reply_text):
-        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        row.get_style_context().add_class("apple-agent-history-row")
         user_label = Gtk.Label(label=f"You: {user_text}")
         user_label.set_line_wrap(True)
         user_label.set_xalign(0)
