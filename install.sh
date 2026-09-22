@@ -36,16 +36,33 @@ note() { printf '    %s\n' "$*"; }
 warn() { printf '\033[1;33m    %s\033[0m\n' "$*"; }
 
 # -- 0. get the code, if run straight from the web ---------------------------
+# Toby's data (memories, notes, settings, models) always lives in
+# ~/linux-agent. The code goes there too on a fresh machine — but if
+# ~/linux-agent already holds something else (an older copy of Toby from
+# another repository, or files that aren't a git checkout at all), it is
+# left exactly as it is and the code goes in ~/.local/share/little-toby.
+same_repo() {
+  [ -d "$1/.git" ] || return 1
+  local url; url="$(git -C "$1" remote get-url origin 2>/dev/null || true)"
+  [ "${url%.git}" = "${REPO_URL%.git}" ]
+}
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
-if [ -z "$SELF_DIR" ] || [ ! -f "$SELF_DIR/scripts/linux_agent_apple.py" ]; then
-  step "Downloading Little Toby into $DATA_DIR"
+if [ -z "$SELF_DIR" ] || [ ! -f "$SELF_DIR/scripts/toby_cli.py" ]; then
   command -v git >/dev/null || sudo pacman -S --needed --noconfirm git
-  if [ -d "$DATA_DIR/.git" ]; then
-    git -C "$DATA_DIR" pull --ff-only
+  if same_repo "$DATA_DIR" || [ ! -e "$DATA_DIR" ]; then
+    CODE_DIR="$DATA_DIR"
   else
-    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$DATA_DIR"
+    CODE_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/little-toby"
   fi
-  exec bash "$DATA_DIR/install.sh" "$@"
+  step "Downloading Little Toby into $CODE_DIR"
+  if [ -d "$CODE_DIR/.git" ]; then
+    git -C "$CODE_DIR" fetch --depth 1 origin "$BRANCH"
+    git -C "$CODE_DIR" checkout -q -B "$BRANCH" FETCH_HEAD
+  else
+    mkdir -p "$(dirname "$CODE_DIR")"
+    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$CODE_DIR"
+  fi
+  exec bash "$CODE_DIR/install.sh" "$@"
 fi
 REPO="$SELF_DIR"
 mkdir -p "$DATA_DIR"
@@ -120,7 +137,15 @@ if [ "$MODELS" = 1 ] && [ "$UPDATE" = 0 ]; then
   done
 fi
 
-[ -f "$REPO/.env" ] || cp "$REPO/.env.example" "$REPO/.env"
+if [ ! -f "$REPO/.env" ]; then
+  # keep the Discord/email settings from an older install if there are any
+  if [ "$REPO" != "$DATA_DIR" ] && [ -f "$DATA_DIR/.env" ]; then
+    cp "$DATA_DIR/.env" "$REPO/.env"
+    sed -i 's/^OLLAMA_MODEL=.*/OLLAMA_MODEL=/' "$REPO/.env"   # let Toby pick the fastest installed model
+  else
+    cp "$REPO/.env.example" "$REPO/.env"
+  fi
+fi
 chmod +x "$REPO/scripts/"*.py "$REPO/scripts/toby-session.sh" "$REPO/bin/toby"
 
 # -- 4. command and services --------------------------------------------------------
@@ -143,6 +168,18 @@ case ":$PATH:" in
   *":$HOME/.local/bin:"*) ;;
   *) warn "Add ~/.local/bin to your PATH to use the toby command (fish: fish_add_path ~/.local/bin)" ;;
 esac
+
+# An older Toby started from your Hyprland config would run alongside the
+# new one (and both would answer Super+G). It's your config, so it's pointed
+# out rather than edited.
+old_refs="$(grep -rnI "linux_agent_apple.py" "$HOME/.config/hypr" 2>/dev/null | grep -v "toby-session" || true)"
+if [ -n "$old_refs" ]; then
+  warn "Your Hyprland config still starts or binds the old Toby here:"
+  printf '%s\n' "$old_refs" | sed 's/^/      /'
+  warn "Delete those lines (Toby now starts itself and binds Super+G), then log out and in."
+fi
+pkill -f "$DATA_DIR/scripts/linux_agent_apple.py" 2>/dev/null && [ "$REPO" != "$DATA_DIR" ] \
+  && note "Stopped the old copy of Toby that was running."
 
 step "Done"
 [ "$started" = 1 ] && note "Toby is running and starts by itself when you log in."
