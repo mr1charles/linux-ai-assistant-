@@ -265,6 +265,53 @@ if win is not None:
         win._action_confirm_pending = False
         win._pending_confirm_purpose = None
 
+# -- the face: tap squash, desktop glances, thinking motes, fade out --------
+if win is not None:
+    try:
+        import cairo as _cairo
+        surf = _cairo.ImageSurface(_cairo.FORMAT_ARGB32, 56, 56)
+        win.face.set_state(app.State.IDLE)
+        win.face.tap()
+        win.face.react("workspace", 1.0)
+        win.face.react("openwindow")
+        for _ in range(5):
+            win.face.tick("neutral")
+            win.face.on_draw(win.face, _cairo.Context(surf))
+        if abs(win.face.squash.value) < 1e-6 and abs(win.face.squash.velocity) < 1e-6:
+            errors.append("tapping the face produced no squash")
+        win.face.set_state(app.State.THINKING)
+        win.face.state_since -= 1.0
+        win.face.tick("neutral")
+        win.face.on_draw(win.face, _cairo.Context(surf))
+
+        # reactions are suppressed while Toby is busy
+        before = win.face.glance.velocity
+        win.face.react("workspace", 1.0)
+        if win.face.glance.velocity != before:
+            errors.append("the face glanced at the desktop while it was thinking")
+
+        # idle intensity 0 means perfectly still
+        app.SETTINGS["animations"] = {"idle_intensity": 0.0}
+        win.face.reload_animation_settings()
+        win.face.set_state(app.State.IDLE)
+        win.face.tick("neutral")
+        if win.face.bob != 0.0 or win.face.sway != 0.0:
+            errors.append("idle intensity 0 still left the face bobbing")
+        app.SETTINGS["animations"] = {}
+        win.face.reload_animation_settings()
+
+        # hiding fades rather than vanishing, and toggling mid-fade reopens it
+        win.show_panel()
+        win.hide_panel()
+        if not win._hiding:
+            errors.append("hiding the panel didn't fade out")
+        win.toggle()
+        if win._hiding:
+            errors.append("toggling during a fade-out didn't bring the panel back")
+        win._finish_hide(win._panel_generation)
+    except Exception:
+        errors.append("face animations: " + traceback.format_exc())
+
 # -- the Dynamic Island's notification card --------------------------------
 if win is not None:
     try:

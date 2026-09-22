@@ -58,6 +58,9 @@ echo "== screen control checks =="
 echo "== memory graph layout checks =="
 "$PY" tests/test_knowledge_graph.py || status=1
 
+echo "== desktop event listener checks =="
+timeout 60 "$PY" tests/test_hypr_events.py || status=1
+
 echo "== lid fold state machine checks =="
 "$PY" tests/test_fold.py || status=1
 

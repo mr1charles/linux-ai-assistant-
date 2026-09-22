@@ -54,6 +54,7 @@ import toby_settings
 import voice_engine
 import camera_engine
 import chibi
+import hypr_events
 import toby_anim
 
 SETTINGS = toby_settings.load()
@@ -1005,12 +1006,25 @@ MOOD_TO_STATE_TWEAK = {
 # ---------------------------------------------------------------------------
 
 class Face(Gtk.DrawingArea):
-    SIZE = 40
+    # The face itself is 40px across; the widget is a little larger so the
+    # thinking motes and the squash on a tap have room to move without being
+    # clipped at the edges.
+    FACE_DIAMETER = 40
+    SIZE = 56
 
     def __init__(self):
         super().__init__()
         self.set_size_request(self.SIZE, self.SIZE)
         self.connect("draw", self.on_draw)
+
+        # physical reactions: a squash when tapped, a hop when a task is done,
+        # a glance when the desktop changes — all springs, so a second tap
+        # mid-reaction continues the motion instead of restarting it
+        self.squash = toby_anim.Spring(0.0, stiffness=420, damping=16)
+        self.glance = toby_anim.Spring(0.0, stiffness=90, damping=14)
+        self.brow_react = toby_anim.Spring(0.0, stiffness=120, damping=14)
+        self._last_tick_time = time.monotonic()
+        self.anim = toby_anim.animation_settings(SETTINGS)
 
         self.t0 = time.monotonic()
         self.state = State.SLEEPING
@@ -1062,6 +1076,35 @@ class Face(Gtk.DrawingArea):
     def pulse_happy(self):
         """Brief celebratory expression — call when a task completes successfully."""
         self._happy_pulse_until = time.monotonic() + 0.7
+        if self.anim["interaction_enabled"]:
+            self.squash.kick(-5.0 * self.anim["interaction_intensity"])  # a little hop
+
+    def tap(self):
+        """A quick squash-and-recover when Toby is clicked."""
+        if self.anim["interaction_enabled"]:
+            self.squash.kick(7.0 * self.anim["interaction_intensity"])
+
+    def react(self, kind, direction=0.0):
+        """Glance at something that just happened on the desktop.
+
+        Small on purpose: a look and a raised brow, over in half a second.
+        It should be the kind of thing you only notice if you're looking.
+        """
+        if not (self.anim["desktop_reactions"] and self.state == State.IDLE):
+            return
+        strength = self.anim["idle_intensity"]
+        if kind in ("workspace", "workspacev2"):
+            self.glance.kick(direction * 9.0 * strength)
+        elif kind in ("openwindow", "urgent"):
+            self.brow_react.kick(4.0 * strength)
+            self.glance.kick(2.5 * strength)
+        elif kind == "closewindow":
+            self.glance.kick(-2.5 * strength)
+        elif kind == "fullscreen":
+            self.brow_react.kick(3.0 * strength)
+
+    def reload_animation_settings(self):
+        self.anim = toby_anim.animation_settings(SETTINGS)
 
     def set_audio_level(self, level):
         """0..1 mic input level, fed continuously while Voice Mode is listening —
@@ -1074,6 +1117,11 @@ class Face(Gtk.DrawingArea):
     def tick(self, mood="neutral"):
         now = time.monotonic()
         elapsed_in_state = now - self.state_since
+        dt = now - self._last_tick_time
+        self._last_tick_time = now
+        self.squash.step(dt)
+        self.glance.step(dt)
+        self.brow_react.step(dt)
 
         target_eye = 1.0
         target_mouth = 0.3
@@ -1156,17 +1204,34 @@ class Face(Gtk.DrawingArea):
         self.right_eye_reveal = lerp(self.right_eye_reveal, target_right_eye_reveal, rate)
         self.mouth_reveal = lerp(self.mouth_reveal, target_mouth_reveal, rate)
 
-        self.breath = math.sin(now * 1.6) * 1.5
-        self.bob = math.sin(now * 1.1) * 2.0 if self.state != State.SLEEPING else 0.0
-        self.sway = math.sin(now * 0.65) * 1.2 if self.state not in (State.SLEEPING, State.WAKING) else 0.0
-        self.tilt = math.sin(now * 0.5) * 0.035 if self.state == State.IDLE else lerp(self.tilt, 0.0, 0.2)
+        # idle life, scaled by the user's idle intensity (0 = perfectly still)
+        idle = self.anim["idle_intensity"] if self.anim["idle_enabled"] else 0.0
+        self.breath = math.sin(now * 1.6) * 1.5 * idle
+        self.bob = math.sin(now * 1.1) * 2.0 * idle if self.state != State.SLEEPING else 0.0
+        self.sway = (math.sin(now * 0.65) * 1.2 * idle
+                     if self.state not in (State.SLEEPING, State.WAKING) else 0.0)
+        self.tilt = (math.sin(now * 0.5) * 0.035 * idle if self.state == State.IDLE
+                     else lerp(self.tilt, 0.0, 0.2))
+        self.look_x = max(-1.2, min(1.2, self.look_x + self.glance.value * 0.08))
+        self.eyebrow += self.brow_react.value * 0.06
 
         self.queue_draw()
 
     def on_draw(self, widget, cr):
         w, h = self.get_allocated_width(), self.get_allocated_height()
         cx, cy = w / 2 + self.sway, h / 2 + self.bob
-        r = (min(w, h) / 2 - 3 + self.breath * 0.3) * max(0.06, self.face_scale)
+        r = (self.FACE_DIAMETER / 2 - 3 + self.breath * 0.3) * max(0.06, self.face_scale)
+
+        # squash and stretch about the bottom of the face, so a tap reads as
+        # something soft being pressed rather than a picture being scaled
+        sq = max(-0.22, min(0.22, self.squash.value * 0.05))
+        if abs(sq) > 0.001:
+            cr.translate(cx, cy + r)
+            cr.scale(1 + sq * 0.7, 1 - sq)
+            cr.translate(-cx, -(cy + r))
+
+        if self.state == State.THINKING and r > 4:
+            self._draw_thinking_motes(cr, cx, cy, r)
 
         # soft contact shadow beneath the face for a touch of depth
         if r > 1:
@@ -1233,6 +1298,27 @@ class Face(Gtk.DrawingArea):
 
         cr.restore()
         return False
+
+    def _draw_thinking_motes(self, cr, cx, cy, r):
+        """Three soft motes drifting around the top of the head.
+
+        In place of a spinner: slow, uneven and gentle, so it reads as Toby
+        mulling something over rather than a progress bar in disguise.
+        """
+        t = time.monotonic() - self.state_since
+        for i in range(3):
+            phase = t * (0.9 + i * 0.17) + i * 2.1
+            angle = -math.pi / 2 + math.sin(phase) * 1.15
+            dist = r + 4.5 + math.sin(phase * 1.7) * 1.2
+            mx = cx + math.cos(angle) * dist
+            my = cy + math.sin(angle) * dist
+            alpha = 0.35 + 0.35 * (0.5 + 0.5 * math.sin(phase * 2.3))
+            hue = (t * 0.08 + i / 3.0) % 1.0
+            rr, gg, bb = RingFlash._hsv_to_rgb(hue, 0.45, 1.0)
+            cr.set_source_rgba(rr, gg, bb, alpha * min(1.0, t * 3))
+            cr.arc(mx, my, 1.8 + 0.5 * math.sin(phase * 3), 0, 2 * math.pi)
+            cr.fill()
+
 
 # ---------------------------------------------------------------------------
 # Rainbow ring flash — separate fullscreen transparent layer
@@ -2871,6 +2957,7 @@ class AssistantWindow(Gtk.Window):
         self._confirm_event = threading.Event()
         self._confirm_result = False
 
+        self._hiding = False
         self.school_mode_config = school_mode.load_config()
         self.school_scheduled_active = False
         self._adaptive_check_running = False
@@ -3577,6 +3664,14 @@ class AssistantWindow(Gtk.Window):
             on_gesture=self.on_camera_gesture,
             on_state=self.on_camera_state,
         )
+        # React to the desktop: a glance toward the workspace you switched
+        # to, a raised brow when a window opens. Read-only, and it reconnects
+        # by itself if Hyprland restarts.
+        self._last_workspace = None
+        self.hypr_listener = hypr_events.HyprEventListener(
+            lambda name, data: GLib.idle_add(self._on_desktop_event, name, data))
+        self.hypr_listener.start()
+
         self.chibi_director = chibi.ChibiDirector(toby_anim.animation_settings(SETTINGS))
         ChibiStage = chibi.make_stage_class()
         self.chibi_stage = ChibiStage(self.chibi_director, accent_getter=lambda: ACCENT_RGB)
@@ -3612,6 +3707,20 @@ class AssistantWindow(Gtk.Window):
         saved_accent = SETTINGS.get("accent_color", "")
         if len(saved_accent) == 7 and saved_accent.startswith("#"):
             self.apply_accent_color(saved_accent)
+
+    def _on_desktop_event(self, name, data):
+        direction = 0.0
+        if name in ("workspace", "workspacev2"):
+            ident = data.split(",")[0]
+            try:
+                number = int(ident)
+                if self._last_workspace is not None:
+                    direction = 1.0 if number > self._last_workspace else -1.0
+                self._last_workspace = number
+            except ValueError:
+                direction = 1.0
+        self.face.react(name, direction)
+        return False
 
     def _publish_remote_state(self):
         """Overridden once the phone bridge exists; a no-op until then."""
@@ -3696,6 +3805,7 @@ class AssistantWindow(Gtk.Window):
         # double-clicks ourselves off plain BUTTON_PRESS events instead.
         if event.type != Gdk.EventType.BUTTON_PRESS:
             return False
+        self.face.tap()
         now = time.monotonic()
         last_click = getattr(self, "_last_face_click_time", 0.0)
         self._last_face_click_time = now
@@ -5030,14 +5140,45 @@ class AssistantWindow(Gtk.Window):
 
     # -- show/hide with wake sequence ---------------------------------------
     def toggle(self, *_args):
-        if self.get_visible():
+        if self.get_visible() and not self._hiding:
             self.hide_panel()
         else:
             self.show_panel()
 
+    def _fade_outer(self, gen, start, end, duration, curve, on_done=None):
+        """Fade the pill's contents between two opacities on the frame clock.
+
+        Opacity goes on the inner container, not the window: GDK on Wayland
+        ignores opacity on a toplevel, but a child widget's opacity is
+        composited by GTK itself and works everywhere. Any newer show/hide
+        (a higher generation) cancels this one mid-fade, so the two never
+        fight.
+        """
+        t0 = time.monotonic()
+
+        def step(_widget, _clock):
+            if gen != self._panel_generation:
+                return GLib.SOURCE_REMOVE
+            t = (time.monotonic() - t0) / max(0.001, duration)
+            self.outer.set_opacity(lerp(start, end, curve(t)))
+            if t >= 1.0:
+                if on_done:
+                    on_done()
+                return GLib.SOURCE_REMOVE
+            return GLib.SOURCE_CONTINUE
+
+        self.outer.set_opacity(start)
+        self.outer.add_tick_callback(step)
+
     def show_panel(self):
         self._panel_generation += 1
+        self._hiding = False
         gen = self._panel_generation
+        anim = toby_anim.animation_settings(SETTINGS)
+        if anim["appear_enabled"]:
+            self._fade_outer(gen, 0.0, 1.0, anim["appear_duration"], toby_anim.ease_out_expo)
+        else:
+            self.outer.set_opacity(1.0)
         self.ring.fire()
         self.outer.get_style_context().remove_class("apple-agent-panel")
         self.outer.get_style_context().add_class("apple-agent-panel-hidden")
@@ -5100,7 +5241,36 @@ class AssistantWindow(Gtk.Window):
 
     def hide_panel(self):
         self._panel_generation += 1  # invalidate any in-flight show animation immediately
+        gen = self._panel_generation
         GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        anim = toby_anim.animation_settings(SETTINGS)
+        if anim["appear_enabled"] and self.get_visible():
+            self._hiding = True
+            # fade out while sinking a little, the reverse of arriving
+            self.face.set_state(State.SLEEPING)
+            start_margin = GtkLayerShell.get_margin(self, GtkLayerShell.Edge.BOTTOM)
+            t0 = time.monotonic()
+            duration = anim["disappear_duration"]
+
+            def sink():
+                if gen != self._panel_generation:
+                    return False
+                t = (time.monotonic() - t0) / duration
+                GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM,
+                                         int(start_margin - 26 * toby_anim.ease_in_cubic(t)))
+                return t < 1.0
+
+            GLib.timeout_add(16, sink)
+            self._fade_outer(gen, self.outer.get_opacity(), 0.0, duration,
+                             toby_anim.ease_in_cubic, on_done=lambda: self._finish_hide(gen))
+            return
+        self._finish_hide(gen)
+
+    def _finish_hide(self, gen):
+        if gen != self._panel_generation:
+            return  # shown again while fading out; leave it be
+        self._hiding = False
+        self.outer.set_opacity(1.0)
         self.set_visible(False)
         self.entry.set_visible(False)
         self.close_btn.set_visible(False)
