@@ -1,20 +1,28 @@
 # Little Toby
 
-A local-first, open-source desktop AI assistant for Hyprland/Arch-based
-Linux. Summon it with a hotkey — a small animated chibi face wakes up
-inside a rainbow ring flash, slides up, and reveals a text box. Type
-natural language and it controls your desktop (open apps/sites, send
-Discord messages, close windows/tabs), answers questions, explains code,
-checks your email, reads your screen (OCR) when asked, and — with your
-explicit one-time confirmation each session — can move the mouse, type,
-click, and install packages. It also keeps a personal knowledge graph and
-study notes, and can shift into a visible **Study Mode** on a schedule or
-automatically when it recognizes schoolwork on screen.
+A local-first desktop AI assistant for Hyprland on Arch/CachyOS, with a
+character. Press Super+G and a small chibi face wakes up in a rainbow ring
+at the bottom of your screen. Ask it something and it answers; ask it to
+*do* something and the face pops out of its pill, grows a little body, and
+walks across your screen doing it — the pointer carried in its hand, typing
+with its hands on an unseen keyboard, a checklist beside it crossing off
+each step as it's done. When it's finished it cheers and hops back home.
 
-Everything is parsed by a local LLM through [Ollama](https://ollama.com) —
-**fully offline by default.** The only things that ever touch the network
-are things that inherently must: sending a Discord message, checking email
-over IMAP, or a browser loading a site you asked it to open.
+It opens apps and sites, closes windows and tabs, sends Discord messages,
+checks email, reads your screen when asked, keeps a personal knowledge
+graph and study notes, quizzes you, and shifts into Study Mode on a
+schedule. With your one-time permission each session — by button or by
+fingerprint — it can move the mouse, type and click. You can also talk to
+it from your phone, from anywhere, and watch it work.
+
+Everything runs on a local model through [Ollama](https://ollama.com) —
+**fully offline by default.** The only things that touch the network are
+things that inherently must: a Discord message, an email check, a site you
+asked it to open, or your own phone reaching your own laptop over your own
+private Tailscale network.
+
+When the laptop goes to sleep, the desktop folds shut toward the hinge like
+a foldable phone; when you open it again, it unfolds.
 
 ## Three modes, one core
 
@@ -27,24 +35,53 @@ over IMAP, or a browser loading a site you asked it to open.
 
 ## Install
 
+One command, one password prompt:
+
 ```bash
-git clone https://github.com/YOUR_USERNAME/linux-agent.git
-cd linux-agent
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/mr1charles/linux-ai-assistant-/main/install.sh | bash
 ```
 
-This installs Ollama + a local model (`qwen2.5:7b-instruct`, ~4.7GB — chosen
-for reliable JSON tool-calling), GTK3 + gtk-layer-shell, `ydotool` (mouse/
-keyboard control), `grim` + `tesseract` (screen reading), espeak-ng, the
-offline speech model (~50MB), and Python dependencies. It will also offer to
-add a `Super+G` keybind and autostart line to your Hyprland config.
+or from a checkout, `./install.sh`. Add `--phone` to also install Tailscale
+for the phone app.
 
-Targets Arch/CachyOS (`pacman`); on other distros install the packages
-listed at the top of `install.sh` manually, then re-run with
-`SKIP_SYSTEM_PACKAGES=1 ./install.sh`.
+That installs the system packages with pacman, gives Toby a private Python
+environment (it never touches your system Python), downloads the fastest
+suitable local model and the offline speech model, and installs two user
+services that start at login — Toby itself, and the lid fold. Then it
+starts them. Press **Super+G**.
 
-To remove the keybind/autostart later (without deleting your data), run
-`./uninstall.sh`.
+It does **not** edit your Hyprland config. Super+G is added to the running
+compositor by Toby when it starts, and only if that key is free (if it
+isn't, `toby doctor` tells you and you can pick another in settings.json).
+That works the same whether your config is `hyprland.conf` or a Lua setup
+like Caelestia's, and a Hyprland reload simply removes it until Toby next
+starts.
+
+On other distros, install the packages listed in `install.sh` yourself and
+run it with `SKIP_SYSTEM_PACKAGES=1`.
+
+## The `toby` command
+
+Everything after installing is one command:
+
+| | |
+|---|---|
+| `toby` | summon Toby (same as Super+G) |
+| `toby start`, `stop`, `restart`, `status` | the services |
+| `toby doctor` | check everything, change nothing |
+| `toby sleep` | play the whole lid fold, then suspend |
+| `toby fold preview` | play the fold and unfold without suspending |
+| `toby phone on`, `pair`, `reset`, `off` | the phone app |
+| `toby animations on`, `off` | Toby-style window animations |
+| `toby model`, `toby model <name>` | see or choose the local model |
+| `toby update` | pull the latest version and refresh dependencies |
+| `toby uninstall` | remove services and the command; keeps your data |
+
+`toby doctor` looks at Python packages, programs, services, the model, the
+summon key and — for the lid fold — how logind handles the lid, how long it
+lets programs delay sleep, whether the fold daemon holds its delay lock,
+and whether your Hyprland config also acts on the lid. It explains
+anything wrong in a sentence and never changes anything itself.
 
 ## Configure (optional)
 
@@ -64,27 +101,14 @@ Only fill in what you actually want:
   allowlist by name; `install_package` only offers to install packages in
   this list (empty by default — add ones you trust).
 
-## Run
+## Running it by hand
+
+The services do this for you. To run Toby in a terminal instead, for
+example to watch its output:
 
 ```bash
-set -a; source .env; set +a          # bash/zsh
-python3 scripts/linux_agent_apple.py &
-```
-```fish
-source scripts/load-env.fish         # fish
-python3 scripts/linux_agent_apple.py &
-```
-
-Press **Super+G** to summon Toby (if install.sh added the keybind), or
-toggle manually:
-```
-pkill -SIGUSR1 -f linux_agent_apple.py
-```
-
-Or run it as a systemd user service instead of `exec-once`:
-```bash
-cp systemd/linux-toby.service ~/.config/systemd/user/
-systemctl --user enable --now linux-toby
+toby stop
+./scripts/toby-session.sh linux_agent_apple.py
 ```
 
 ## Using Toby
@@ -262,6 +286,121 @@ systemctl --user enable --now linux-toby
   or Kami on screen (edit `adaptive_keywords` in `school_mode.json`, or ask
   Toby to set your schedule).
 
+## Toby at work: the chibi
+
+When a request involves the screen — opening something, moving the
+pointer, clicking, typing, closing a tab — Toby's face leaves the pill,
+grows a body, and does it in front of you:
+
+- It walks to each place it's going to act. The real pointer only moves once
+  Toby's hand is there, so the cursor is carried rather than drifting across
+  the screen on its own.
+- Typing gets a typing pose, clicks a little tap, opening something a reach.
+- A speech bubble names the step it's on, and a checklist in the corner
+  shows the whole task: finished steps crossed out, the current one in bold,
+  the rest waiting. The Dynamic Island shows the same progress —
+  "2 of 4 · Click" with a filling ring — even with the panel closed.
+- At the end it says the reply, cheers, folds its body away and flies back
+  into the pill.
+
+The chibi is on a click-through layer: it never blocks anything underneath
+it, and it only draws while it's out. It can be turned off in Settings,
+Animations; the task still runs, just without the show.
+
+## The lid fold
+
+When the laptop suspends — lid, menu, or `toby sleep` — the desktop
+compresses slightly toward the centre, leans toward you, folds down onto
+the hinge with motion blur, shading and a glint along its top edge, and
+fades to black. When the laptop wakes, the same motion runs in reverse from
+black: it unfolds from the hinge, expands and flattens back into your
+desktop.
+
+It can't get between your laptop and sleep. It runs as its own small
+service and holds a systemd-logind *delay* lock: logind waits for it, but
+never longer than logind's own cap, and never at all if the service has
+crashed, because the lock is a file descriptor that closes with the
+process. It also lets go on its own deadline whether or not a frame was
+drawn, and if it can't take a screenshot there's no animation and no delay.
+If a suspend it folded for never comes, it unfolds by itself. None of your
+lid or suspend configuration is touched.
+
+One honest limit: a laptop reports the lid closing only when it's almost
+shut, so you'll mostly see the first part of the closing fold, if that.
+The unfold on opening is fully visible. To watch the whole close, run
+`toby sleep` (or bind it to a key): it plays the full fold with the lid
+open, then suspends. `toby fold preview` plays both halves without
+suspending.
+
+## Talking to Toby from your phone
+
+The phone app is a small installable web app, the same on iPhone and
+Android. Turn it on and pair:
+
+```bash
+toby phone on
+```
+
+That prints a QR code. Scan it with the phone's camera, then **Share, Add
+to Home Screen** (iPhone) or **Install app** (Android), and Toby is an app
+on your home screen. Type or tap the microphone and say what you want; the
+laptop does it, and the phone shows the same live checklist, the reply, and
+any permission prompt — which you can answer from the phone.
+
+It works from anywhere your phone has internet, through
+[Tailscale](https://tailscale.com): a free, private network between your own
+devices. Install it on the laptop (`./install.sh --phone`, or
+`sudo pacman -S tailscale`) and on the phone, and sign in to the same
+account on both. Toby itself only ever listens on the laptop's loopback
+address; Tailscale publishes it to your devices alone, with a real HTTPS
+certificate. Nothing is exposed to the public internet and nothing passes
+through anyone else's server.
+
+On top of that, every request needs the pairing code from the QR — 256
+random bits, kept in a file only you can read, compared in constant time,
+with a lockout after repeated wrong guesses. A paired phone can do no more
+than you can at the keyboard: the mouse, keyboard and installs still stop
+at the same permission prompt. `toby phone reset` unpairs every phone at
+once; `toby phone off` turns the whole thing off.
+
+It's a web app rather than a store app on purpose: one version works on
+both platforms, updates itself from your laptop, and needs no developer
+account or App Store review.
+
+## Fingerprint approval
+
+In Settings, **Approve permission prompts with your fingerprint** lets a
+touch of the reader answer the one-time "Let Toby use your mouse and
+keyboard?" question. It goes through fprintd, so Toby only ever learns
+"matched" or "didn't". A miss never counts as "no"; the buttons always
+still work. Enrol a finger first with `fprintd-enroll`.
+
+## Animations
+
+Everything moves on the same small set of curves — quick to start, soft to
+settle, no cartoon bounce — so the pill, the chibi, the island and the fold
+feel like one thing. The face breathes, blinks, glances toward a workspace
+you switch to, looks up when a window opens, squashes when you tap it, hops
+when a task is done, and has drifting motes instead of a spinner while it
+thinks. The pill fades and slides in and out.
+
+**Settings, Animations** has a switch for each animation and sliders for
+fold speed, strength, perspective, motion blur and shrink, idle
+liveliness, tap reaction and walking speed, plus Preview the fold. They're
+saved in `settings.json` under `"animations"`, where out-of-range values are
+clamped rather than trusted.
+
+`toby animations on` also gives Hyprland's own window, workspace, minimise
+(special workspace) and menu animations Toby's curves. That's applied to
+the running compositor only, checked by reading back what Hyprland reports,
+and undone by `toby animations off` or any Hyprland reload — your config
+file is never edited, so Caelestia or Noctalia stay exactly as they were.
+
+It's all tuned for an integrated-graphics laptop. With the pill open and
+idle Toby uses a few percent of one core (it was about 18% before this
+work), under 1% hidden, and nothing is drawn by any overlay once its
+animation ends.
+
 ## What it can do
 
 - "open youtube then tiktok" — opens sites in order
@@ -293,17 +432,23 @@ own prompt, so that is where the effort went:
   startup, so the first thing you say after a break doesn't pay to load
   several gigabytes off disk.
 
-If it's still slow, the two real levers are a lighter model (below) and
-Smart mode, which sends the request to a cloud model instead.
+- Obvious one-step requests don't wait for the model at all: "open youtube
+  and tiktok", "close this tab", "study mode on", "what time is it" happen
+  instantly. Only a request that matches a known shape completely is
+  handled this way; anything needing judgement still goes to the model.
+- Toby picks the best local model you have installed, preferring the Qwen3
+  4B instruct release: smaller than the old 7B default, so faster on a CPU,
+  and better at following instructions. `toby model` shows or changes it.
+
+If it's still slow, the other lever is Smart mode, which sends a request to
+a cloud model instead.
 
 ## Notes
 
-- `qwen2.5:7b-instruct` needs a decent GPU or ~8GB RAM for reasonable
-  latency. On a lighter laptop, `ollama pull qwen2.5:1.5b` and set
-  `OLLAMA_MODEL=qwen2.5:1.5b` in `.env` — it's less reliable at strict JSON
-  formatting, so tool-calling may misfire more often. A model set in
-  Settings applies everywhere, including fact extraction, quizzes,
-  flashcards and screen summaries.
+- A model chosen with `toby model` or in Settings applies everywhere,
+  including fact extraction, quizzes, flashcards and screen summaries.
+  Very small models (1.5B) are faster still but less reliable at producing
+  the structured output tool-calling depends on.
 - Mouse and keyboard control need `ydotoold` running:
   `systemctl --user enable --now ydotool.service`. Without it every
   ydotool call hangs until it times out. Toby copes with both the current
@@ -317,8 +462,9 @@ Smart mode, which sends the request to a cloud model instead.
   compositor.
 - Everything Toby learns lives in plain JSON/Markdown files under
   `~/linux-agent/` (`knowledge.json`, `study_notes.json`, `history.json`,
-  `session_log.md`, `school_mode.json`, `settings.json`) — delete any of them to reset that
-  part, or back them up like any other file.
+  `session_log.md`, `school_mode.json`, `study_plan.json`, `settings.json`,
+  and `remote.json` for the phone pairing code) — delete any of them to
+  reset that part, or back them up like any other file.
 
 ## Working on it
 
@@ -337,14 +483,26 @@ installed:
   both argument syntaxes and with none installed
 - each Memories graph layout: nodes inside the view, spread out rather than
   stacked, and the same picture twice running
+- the lid fold's state machine through rapid close/open cycles, early
+  suspends, crashes mid-draw and failed screenshots — above all, that the
+  sleep lock is always released in time — and its window, built for real
+- the chibi's motion and drawing, and that no wait on it can hang a task
+- a real four-step task through the app with the chibi out, checking order,
+  the pointer waiting for the hand, and everything put away afterwards
+- a phone request over HTTP, through the app, to the reply coming back; the
+  bridge's authentication and lockout; and the phone app itself in headless
+  Chromium at phone size
+- fingerprint approval against stand-ins for fprintd, including cancel and
+  timeout
+- the fast path, both what it takes and near-misses it must decline
+- model selection, the desktop event listener (including a compositor
+  restart), and the runtime Hyprland animations
 - the stylesheet, through the real GTK CSS parser, for ten accent colours
-  including malformed ones, plus a check that every class the code applies
-  exists in the sheet
-- the prompt: that its static half really is static, and that the context
-  budgets and history trimming hold
+- the prompt: that its static half really is static, and the context budgets
 - the whole widget tree, constructed against real GTK with GtkLayerShell
-  stubbed out, every custom Cairo widget drawn, and hand pointing driven
-  through the real camera callback
+  stubbed out, every custom Cairo widget drawn, GTK's own warnings treated
+  as failures
+- idle CPU use, so a regression in the animation budget is caught
 
 What they can't cover is anchoring, margins, input regions and anything
 else that only means something to a live compositor — those still need a

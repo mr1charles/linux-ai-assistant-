@@ -9,14 +9,14 @@ and study notes, can (with explicit per-session confirmation) control the
 mouse/keyboard and install packages, and can shift into Study Mode on a
 schedule or automatically when it recognizes schoolwork on screen.
 
-Setup: see README.md in the project root.
+Setup: ./install.sh, then `toby doctor`. See README.md.
 
-Hyprland keybind (Super+G to summon):
+Toby binds Super+G in the running Hyprland itself at startup (only if the
+key is free, and never in your config). To bind it yourself instead:
   bind = SUPER, G, exec, pkill -SIGUSR1 -f linux_agent_apple.py
-  exec-once = bash -c 'set -a; source ~/linux-agent/.env; set +a; python3 ~/linux-agent/scripts/linux_agent_apple.py'
 
-For real background blur behind the panel (glassmorphism), Hyprland can blur
-by namespace — add to hyprland.conf:
+Optional glass blur behind Toby's surfaces, if you'd like it — add to your
+Hyprland config:
   layerrule = blur, apple-agent
   layerrule = ignorezero, apple-agent
 """
