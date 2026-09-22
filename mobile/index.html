@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0c17">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Toby">
+  <title>Little Toby</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon.svg">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <main id="app">
+    <header class="top">
+      <div class="status"><span id="dot" class="dot"></span><span id="status-text">Connecting</span></div>
+    </header>
+
+    <section class="stage">
+      <svg id="face" class="face" viewBox="0 0 120 120" aria-hidden="true">
+        <defs>
+          <radialGradient id="skin" cx="38%" cy="35%" r="70%">
+            <stop offset="0" stop-color="#ffd95a"/>
+            <stop offset="1" stop-color="#ffa626"/>
+          </radialGradient>
+        </defs>
+        <path class="sprout" d="M60 20 C62 12 68 10 70 7" fill="none" stroke="#ffa626" stroke-width="3" stroke-linecap="round"/>
+        <circle class="sprout-tip" cx="71" cy="6" r="3.2"/>
+        <circle cx="60" cy="62" r="42" fill="url(#skin)"/>
+        <g class="eyes">
+          <ellipse cx="45" cy="57" rx="5.6" ry="6.2" fill="#261a0d"/>
+          <ellipse cx="75" cy="57" rx="5.6" ry="6.2" fill="#261a0d"/>
+          <circle cx="47" cy="55" r="1.8" fill="#fff" opacity=".85"/>
+          <circle cx="77" cy="55" r="1.8" fill="#fff" opacity=".85"/>
+        </g>
+        <circle cx="37" cy="70" r="5" fill="#ff7359" opacity=".35"/>
+        <circle cx="83" cy="70" r="5" fill="#ff7359" opacity=".35"/>
+        <path id="mouth" d="M49 76 Q60 84 71 76" fill="none" stroke="#261a0d" stroke-width="3.2" stroke-linecap="round"/>
+      </svg>
+      <p id="reply" class="reply">Ask me anything, or tell me what to do on your laptop.</p>
+    </section>
+
+    <section id="task" class="card task" hidden>
+      <div class="task-head">
+        <h2 id="task-title">Working on it</h2>
+        <button id="cancel" class="link">Cancel</button>
+      </div>
+      <div class="progress"><div id="progress-bar"></div></div>
+      <ol id="steps"></ol>
+    </section>
+
+    <section id="confirm" class="card confirm" hidden>
+      <p id="confirm-text">Let Toby use your mouse and keyboard?</p>
+      <div class="row">
+        <button id="confirm-no" class="secondary">No</button>
+        <button id="confirm-yes" class="primary">Yes</button>
+      </div>
+    </section>
+
+    <section id="pair" class="card pair" hidden>
+      <h2>Pair this phone</h2>
+      <p>On your laptop, run <code>toby phone pair</code> and scan the code it shows. That opens this app already paired.</p>
+      <p class="quiet">Or paste the pairing code here:</p>
+      <div class="row">
+        <input id="pair-code" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Pairing code">
+        <button id="pair-save" class="primary">Pair</button>
+      </div>
+    </section>
+
+    <form id="composer" class="composer">
+      <input id="text" autocomplete="off" enterkeyhint="send" placeholder="Message Toby">
+      <button type="button" id="mic" class="mic" aria-label="Talk to Toby">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4" fill="none" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <button type="submit" id="send" class="send" aria-label="Send">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </form>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>

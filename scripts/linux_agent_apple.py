@@ -58,6 +58,7 @@ import fast_path
 import fingerprint
 import hypr_events
 import model_picker
+import remote_bridge
 import toby_anim
 
 SETTINGS = toby_settings.load()
@@ -3814,6 +3815,8 @@ class AssistantWindow(Gtk.Window):
         saved_accent = SETTINGS.get("accent_color", "")
         if len(saved_accent) == 7 and saved_accent.startswith("#"):
             self.apply_accent_color(saved_accent)
+        # last, so everything it reports on already exists
+        self._start_remote_bridge()
 
     def _on_desktop_event(self, name, data):
         direction = 0.0
@@ -3829,8 +3832,77 @@ class AssistantWindow(Gtk.Window):
         self.face.react(name, direction)
         return False
 
-    def _publish_remote_state(self):
-        """Overridden once the phone bridge exists; a no-op until then."""
+    # -- the phone app ---------------------------------------------------------------
+    def _start_remote_bridge(self):
+        """Serve the phone app, if you've turned it on (`toby phone on`)."""
+        self.remote = None
+        self._busy = False
+        self._remote_reply = ""
+        self._last_remote_publish = 0.0
+        if not SETTINGS.get("remote_enabled"):
+            return
+        window = self
+
+        class Callbacks:
+            # These run on the bridge's request threads, so they only read
+            # simple flags and hand real work to the GTK thread.
+            def ask(self, text):
+                if window._busy:
+                    return False, "Toby is still working on the last thing. Try again in a moment."
+                window._busy = True
+                GLib.idle_add(window._remote_ask, text)
+                return True, "Sent."
+
+            def confirm(self, answer):
+                if not window.confirm_row.get_visible():
+                    return False
+                GLib.idle_add(lambda: (window.on_confirm_yes() if answer else window.on_confirm_no()) or False)
+                return True
+
+            def cancel(self):
+                if not window._busy:
+                    return False
+                GLib.idle_add(lambda: window.on_task_cancel() or False)
+                return True
+
+        try:
+            token = remote_bridge.load_token()
+            self.remote = remote_bridge.RemoteBridge(
+                Callbacks(), token, host=SETTINGS.get("remote_bind", "127.0.0.1"),
+                port=int(SETTINGS.get("remote_port", 8765))).start()
+            self._publish_remote_state(force=True)
+        except OSError as e:
+            print(f"PHONE BRIDGE: couldn't start ({e}); the phone app won't connect", flush=True)
+            self.remote = None
+
+    def _remote_ask(self, text):
+        self.entry.set_text(text)
+        self.on_submit(self.entry)
+        return False
+
+    def _publish_remote_state(self, force=False):
+        """Tell a connected phone what Toby is doing right now."""
+        remote = getattr(self, "remote", None)
+        if remote is None:
+            return False
+        now = time.monotonic()
+        if not force and now - self._last_remote_publish < 0.2:
+            return False   # streaming text arrives fast; a few updates a second is plenty
+        self._last_remote_publish = now
+        steps = [{"label": label, "status": status}
+                 for label, status in self.task_steps if label != "Thinking"]
+        history = [{"role": m["role"], "content": m["content"][:400]} for m in self.history[-6:]]
+        confirm = None
+        if self.confirm_row.get_visible():
+            confirm = {"pending": True, "text": self.confirm_label.get_text()}
+        remote.publish({
+            "busy": self._busy,
+            "task": self._chibi_title() if self._busy or steps else "",
+            "steps": steps,
+            "reply": self._remote_reply,
+            "confirm": confirm,
+            "history": history,
+        })
         return False
 
     def on_island_click(self):
@@ -4749,6 +4821,8 @@ class AssistantWindow(Gtk.Window):
         if not text:
             return
         self.entry.set_text("")
+        self._busy = True
+        self._remote_reply = ""
         self.face.set_state(State.THINKING)
         self.answer.set_text("")
         self.task_cancelled = False
@@ -4770,6 +4844,8 @@ class AssistantWindow(Gtk.Window):
         self._waiting_for_first_chunk = True
         self._start_thinking_dots()
         GLib.timeout_add(1200, lambda: self._maybe_show_thinking_island(my_request_id))
+
+        self._publish_remote_state(force=True)
 
         # Run on a background thread — process()/think() do blocking network
         # I/O, and running that on the GTK main thread would freeze the whole
@@ -5098,6 +5174,7 @@ class AssistantWindow(Gtk.Window):
 
     def _show_confirm_dialog(self):
         self._start_fingerprint_scan()
+        GLib.idle_add(lambda: self._publish_remote_state(force=True))
         self.island.hide_island()
         self.set_visible(True)
         self.present()
@@ -5117,6 +5194,9 @@ class AssistantWindow(Gtk.Window):
     def finish_cancelled(self):
         self._set_task_step_status(self._current_step_index(), "error")
         self._chibi_end()
+        self._busy = False
+        self._remote_reply = "Cancelled."
+        self._publish_remote_state(force=True)
         self.face.set_state(State.IDLE)
         self.answer.set_text("Cancelled.")
         self.answer.set_visible(True)
@@ -5128,6 +5208,9 @@ class AssistantWindow(Gtk.Window):
     def finish_response(self, text, result, actions_succeeded=0):
         self._waiting_for_first_chunk = False  # safety net in case no partial "reply" text ever streamed
         self._chibi_end(result.get("reply", "") if not self.task_cancelled else "")
+        self._busy = False
+        self._remote_reply = result.get("reply", "") or ("Cancelled." if self.task_cancelled else "")
+        self._publish_remote_state(force=True)
 
         self.current_mood = result.get("mood", "neutral")
         self.face.set_state(State.RESPONDING)
@@ -5237,6 +5320,9 @@ class AssistantWindow(Gtk.Window):
 
     def update_streaming_answer(self, content):
         display = extract_partial_reply(content)
+        if display:
+            self._remote_reply = display
+            self._publish_remote_state()
         if display is None:
             try:
                 parsed = json.loads(content.strip().removeprefix("```json").removeprefix("```").removesuffix("```"))
@@ -5270,6 +5356,7 @@ class AssistantWindow(Gtk.Window):
     # -- confirm handlers -----------------------------------------------------
     def on_confirm_yes(self, *_a):
         self._cancel_fingerprint_scan()
+        GLib.idle_add(lambda: self._publish_remote_state(force=True))
         screen_control.grant()
         install_guard.grant_once()
         self.confirm_row.set_visible(False)
@@ -5291,6 +5378,7 @@ class AssistantWindow(Gtk.Window):
 
     def on_confirm_no(self, *_a):
         self._cancel_fingerprint_scan()
+        GLib.idle_add(lambda: self._publish_remote_state(force=True))
         screen_control.deny()
         self.confirm_row.set_visible(False)
         self.input_shape_combine_region(None)

@@ -48,6 +48,9 @@ def pump(seconds, until=None):
 
 
 try:
+    # the phone bridge on, on any free port
+    app.SETTINGS["remote_enabled"] = True
+    app.SETTINGS["remote_port"] = 0
     win = app.AssistantWindow(app.RingFlash())
     win.show_panel()
     pump(0.5)
@@ -157,6 +160,49 @@ try:
     if win.answer.get_text() != "Opening YouTube.":
         errors.append(f"the fast path reply didn't show: {win.answer.get_text()!r}")
     pump(8, until=lambda: not win.chibi_director.visible)
+
+    # -- a request from the phone, end to end over HTTP ----------------------
+    import json as _json
+    import urllib.request as _url
+    calls.clear()
+    if win.remote is None:
+        errors.append("the phone bridge didn't start with remote_enabled on")
+    else:
+        rhost, rport = win.remote.address
+        token = win.remote.token
+
+        def phone(path, body=None):
+            req = _url.Request(f"http://{rhost}:{rport}{path}",
+                               data=None if body is None else _json.dumps(body).encode(),
+                               method="GET" if body is None else "POST")
+            req.add_header("Authorization", "Bearer " + token)
+            req.add_header("Content-Type", "application/json")
+            with _url.urlopen(req, timeout=5) as r:
+                return _json.loads(r.read())
+
+        replies = {}
+        t = threading.Thread(target=lambda: replies.setdefault("ask", phone("/api/ask", {"text": "open youtube and tiktok"})))
+        t.start()
+        pump(3, until=lambda: not t.is_alive())
+        if not replies.get("ask", {}).get("ok"):
+            errors.append(f"the phone's request was refused: {replies}")
+        pump(12, until=lambda: not win._busy and len(calls) >= 2)
+        pump(0.5)
+        if calls != [("open", "https://www.youtube.com"), ("open", "https://www.tiktok.com")]:
+            errors.append(f"the phone's request didn't run on the laptop: {calls}")
+        holder = {}
+        t = threading.Thread(target=lambda: holder.setdefault("s", phone("/api/state")))
+        t.start()
+        pump(3, until=lambda: not t.is_alive())
+        state = holder.get("s", {})
+        if state.get("reply") != "Opening YouTube and TikTok.":
+            errors.append(f"the phone didn't get the reply: {state.get('reply')!r}")
+        if [st["status"] for st in state.get("steps", [])] != ["done", "done"]:
+            errors.append(f"the phone didn't see both steps done: {state.get('steps')}")
+        if state.get("busy"):
+            errors.append("the phone still thinks Toby is busy")
+        pump(8, until=lambda: not win.chibi_director.visible)
+        win.remote.stop()
 
     print(f"a mid-task frame is at {workdir}/chibi_mid_task.png" if frame_saved[0]
           else "no mid-task frame captured")

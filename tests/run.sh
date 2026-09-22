@@ -58,6 +58,12 @@ echo "== screen control checks =="
 echo "== memory graph layout checks =="
 "$PY" tests/test_knowledge_graph.py || status=1
 
+echo "== phone bridge checks =="
+timeout 90 "$PY" tests/test_remote_bridge.py || status=1
+
+echo "== phone app in a real browser =="
+timeout 180 "$PY" tests/browser_phone_app.py || status=1
+
 echo "== fast path checks =="
 "$PY" tests/test_fast_path.py || status=1
 
