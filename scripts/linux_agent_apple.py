@@ -55,6 +55,7 @@ import voice_engine
 import camera_engine
 import chibi
 import fast_path
+import fingerprint
 import hypr_events
 import model_picker
 import toby_anim
@@ -2791,6 +2792,60 @@ def set_accent_rgb(hex_color):
 # RMS values from voice_engine (not a decorative animation loop).
 # ---------------------------------------------------------------------------
 
+class FingerprintGlyph(Gtk.DrawingArea):
+    """A drawn fingerprint mark for the permission prompt.
+
+    Ridges are concentric arcs; while the reader is waiting, a highlight
+    sweeps up through them, and it turns green on a match or briefly red on
+    a miss. It animates only while a scan is running.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.set_size_request(26, 26)
+        self.connect("draw", self.on_draw)
+        self.state = "idle"        # idle | scanning | match | miss
+        self._t0 = time.monotonic()
+        self._timer = None
+
+    def set_state(self, state):
+        self.state = state
+        self._t0 = time.monotonic()
+        if state == "scanning" and self._timer is None:
+            self._timer = GLib.timeout_add(33, self._tick)
+        self.queue_draw()
+
+    def _tick(self):
+        if self.state != "scanning" or not self.get_visible():
+            self._timer = None
+            return False
+        self.queue_draw()
+        return True
+
+    def on_draw(self, widget, cr):
+        w, h = widget.get_allocated_width(), widget.get_allocated_height()
+        cx, cy = w / 2, h / 2 + 2
+        t = time.monotonic() - self._t0
+        base = {"match": (0.435, 0.902, 0.659), "miss": (1.0, 0.5, 0.5)}.get(
+            self.state, ACCENT_RGB)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.set_line_width(1.5)
+        sweep = (t * 0.8) % 1.0
+        for i in range(5):
+            radius = 2.5 + i * 2.3
+            level = i / 4.0
+            glow = 1.0 - min(1.0, abs(level - sweep) * 3.0) if self.state == "scanning" else 0.0
+            alpha = 0.45 + 0.55 * glow if self.state == "scanning" else 0.9
+            cr.set_source_rgba(*base, alpha)
+            cr.new_sub_path()
+            cr.arc(cx, cy, radius, math.pi * (1.05 + i * 0.02), math.pi * (1.95 - i * 0.02))
+            cr.stroke()
+            cr.new_sub_path()
+            cr.arc(cx, cy, radius, math.pi * 0.15, math.pi * (0.7 - i * 0.05))
+            cr.stroke()
+        return False
+
+
 class WaveformView(Gtk.DrawingArea):
     BARS = 24
 
@@ -2983,6 +3038,8 @@ class AssistantWindow(Gtk.Window):
         self._confirm_result = False
 
         self._hiding = False
+        self._fingerprint_ready = False
+        self._fingerprint_scan = None
         self.school_mode_config = school_mode.load_config()
         self.school_scheduled_active = False
         self._adaptive_check_running = False
@@ -3135,7 +3192,10 @@ class AssistantWindow(Gtk.Window):
         self.confirm_row.set_margin_start(48)
         self.confirm_row.set_no_show_all(True)
         self.current.pack_start(self.confirm_row, False, True, 0)
-        confirm_label = Gtk.Label(label="Control screen enable?")
+        self.fingerprint_glyph = FingerprintGlyph()
+        self.fingerprint_glyph.set_no_show_all(True)
+        self.confirm_row.pack_start(self.fingerprint_glyph, False, False, 0)
+        confirm_label = Gtk.Label(label=self.CONFIRM_TEXT)
         self.confirm_label = confirm_label
         self.confirm_row.pack_start(confirm_label, False, False, 0)
         yes_btn = Gtk.Button(label="Yes")
@@ -3550,6 +3610,26 @@ class AssistantWindow(Gtk.Window):
         camera_record_hint.get_style_context().add_class("apple-agent-dashboard-title")
         settings_page.pack_start(camera_record_hint, False, False, 4)
 
+        fp_separator = Gtk.Label(label="Fingerprint")
+        fp_separator.set_xalign(0)
+        fp_separator.get_style_context().add_class("apple-agent-section-heading")
+        settings_page.pack_start(fp_separator, False, False, 6)
+        fp_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        fp_row.pack_start(Gtk.Label(label="Approve permission prompts with your fingerprint"),
+                          False, False, 0)
+        self.settings_fingerprint_switch = Gtk.Switch()
+        self.settings_fingerprint_switch.set_active(SETTINGS.get("confirm_with_fingerprint", False))
+        fp_row.pack_end(self.settings_fingerprint_switch, False, False, 0)
+        settings_page.pack_start(fp_row, False, False, 0)
+        fp_note = Gtk.Label(
+            label="Uses fprintd, the standard Linux fingerprint service. Toby only hears "
+                  "\"matched\" or \"didn't\" — nothing about your fingerprint itself. The Yes "
+                  "and No buttons keep working. Enrol a finger first with: fprintd-enroll")
+        fp_note.set_xalign(0)
+        fp_note.set_line_wrap(True)
+        fp_note.get_style_context().add_class("apple-agent-dashboard-title")
+        settings_page.pack_start(fp_note, False, False, 4)
+
         cloud_separator = Gtk.Label(label="Cloud AI (optional)")
         cloud_separator.set_xalign(0)
         cloud_separator.get_style_context().add_class("apple-agent-section-heading")
@@ -3696,6 +3776,8 @@ class AssistantWindow(Gtk.Window):
         self.hypr_listener = hypr_events.HyprEventListener(
             lambda name, data: GLib.idle_add(self._on_desktop_event, name, data))
         self.hypr_listener.start()
+        if SETTINGS.get("confirm_with_fingerprint"):
+            self._check_fingerprint_reader()
 
         self.chibi_director = chibi.ChibiDirector(toby_anim.animation_settings(SETTINGS))
         ChibiStage = chibi.make_stage_class()
@@ -4031,6 +4113,9 @@ class AssistantWindow(Gtk.Window):
         SETTINGS["cloud_api_key"] = self.settings_cloud_key_entry.get_text().strip()
         SETTINGS["cloud_model"] = self.settings_cloud_model_entry.get_text().strip() or "gpt-4o"
         SETTINGS["voice_auto_cloud"] = self.settings_voice_auto_cloud_switch.get_active()
+        SETTINGS["confirm_with_fingerprint"] = self.settings_fingerprint_switch.get_active()
+        if SETTINGS["confirm_with_fingerprint"]:
+            self._check_fingerprint_reader()
 
         toby_settings.save(SETTINGS)
         self.settings_save_status.set_text("Saved.")
@@ -4965,7 +5050,54 @@ class AssistantWindow(Gtk.Window):
             on_main(self.chibi_director.perform, "think", 0.5)
             time.sleep(0.15)
 
+    CONFIRM_TEXT = "Let Toby use your mouse and keyboard?"
+
+    def _start_fingerprint_scan(self, attempt=1):
+        """If turned on and a reader is set up, let a fingerprint say yes."""
+        if not (SETTINGS.get("confirm_with_fingerprint") and self._fingerprint_ready):
+            self.fingerprint_glyph.set_visible(False)
+            return
+        self.fingerprint_glyph.set_visible(True)
+        self.fingerprint_glyph.set_state("scanning")
+        if attempt == 1:
+            self.confirm_label.set_text(self.confirm_label.get_text().rstrip("?")
+                                        + "? Touch the reader, or press Yes.")
+
+        def on_result(outcome):
+            GLib.idle_add(self._on_fingerprint_result, outcome, attempt)
+
+        self._fingerprint_scan = fingerprint.FingerprintScan(on_result).start()
+
+    def _on_fingerprint_result(self, outcome, attempt):
+        if not self.confirm_row.get_visible():
+            return False   # answered some other way already
+        if outcome == "match":
+            self.fingerprint_glyph.set_state("match")
+            GLib.timeout_add(250, lambda: self.on_confirm_yes() or False)
+        elif outcome == "no-match" and attempt < 3:
+            self.fingerprint_glyph.set_state("miss")
+            GLib.timeout_add(600, lambda: self._start_fingerprint_scan(attempt + 1) or False)
+        elif outcome != "cancelled":
+            # out of attempts, or the reader errored: the buttons still work
+            self.fingerprint_glyph.set_state("miss")
+        return False
+
+    def _cancel_fingerprint_scan(self):
+        scan = getattr(self, "_fingerprint_scan", None)
+        if scan is not None:
+            scan.cancel()
+            self._fingerprint_scan = None
+        self.fingerprint_glyph.set_visible(False)
+
+    def _check_fingerprint_reader(self):
+        """Find out once, off the GTK thread, whether a reader is usable."""
+        def worker():
+            ready = fingerprint.reader_available()
+            GLib.idle_add(lambda: setattr(self, "_fingerprint_ready", ready) or False)
+        threading.Thread(target=worker, daemon=True).start()
+
     def _show_confirm_dialog(self):
+        self._start_fingerprint_scan()
         self.island.hide_island()
         self.set_visible(True)
         self.present()
@@ -5137,13 +5269,14 @@ class AssistantWindow(Gtk.Window):
 
     # -- confirm handlers -----------------------------------------------------
     def on_confirm_yes(self, *_a):
+        self._cancel_fingerprint_scan()
         screen_control.grant()
         install_guard.grant_once()
         self.confirm_row.set_visible(False)
         self.input_shape_combine_region(None)
         purpose = self._pending_confirm_purpose
         self._pending_confirm_purpose = None
-        self.confirm_label.set_text("Control screen enable?")
+        self.confirm_label.set_text(self.CONFIRM_TEXT)
         if purpose == "pinch_cursor" and not self._action_confirm_pending:
             # This prompt came from the Camera Mode switch, not from an
             # action waiting on a background thread, so nothing is blocked
@@ -5157,12 +5290,13 @@ class AssistantWindow(Gtk.Window):
             self._arm_pinch_cursor()
 
     def on_confirm_no(self, *_a):
+        self._cancel_fingerprint_scan()
         screen_control.deny()
         self.confirm_row.set_visible(False)
         self.input_shape_combine_region(None)
         purpose = self._pending_confirm_purpose
         self._pending_confirm_purpose = None
-        self.confirm_label.set_text("Control screen enable?")
+        self.confirm_label.set_text(self.CONFIRM_TEXT)
         if purpose == "pinch_cursor":
             self.settings_pinch_cursor_switch.set_active(False)
             SETTINGS["camera_pinch_cursor"] = False
