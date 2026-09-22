@@ -54,14 +54,18 @@ import toby_settings
 import voice_engine
 import camera_engine
 import chibi
+import fast_path
 import hypr_events
+import model_picker
 import toby_anim
 
 SETTINGS = toby_settings.load()
 
 REPO_DIR = Path.home() / "linux-agent"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+# Blank means "pick the best installed model at startup" (model_picker.py).
+OLLAMA_MODEL_ENV = os.environ.get("OLLAMA_MODEL", "").strip()
+OLLAMA_MODEL = OLLAMA_MODEL_ENV or model_picker.FALLBACK
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.environ.get("EMAIL_APP_PASSWORD")
@@ -801,6 +805,14 @@ def apply_model_settings():
     study_notes.configure(OLLAMA_URL, model, OLLAMA_KEEP_ALIVE)
 
 
+def resolve_model():
+    """Settle which local model to use, from what Ollama has installed."""
+    global OLLAMA_MODEL
+    OLLAMA_MODEL = model_picker.pick(SETTINGS.get("ollama_model", ""), OLLAMA_MODEL_ENV,
+                                     model_picker.installed_models(OLLAMA_URL))
+    return OLLAMA_MODEL
+
+
 def warm_up_model():
     """Load the model into memory in the background at startup.
 
@@ -812,6 +824,8 @@ def warm_up_model():
     """
     def worker():
         try:
+            resolve_model()
+            apply_model_settings()
             requests.post(
                 OLLAMA_URL.replace("/api/chat", "/api/generate"),
                 json={"model": _active_model(), "prompt": "", "stream": False,
@@ -837,6 +851,9 @@ def think(instruction, history, on_chunk=None, cancel_check=None):
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": OLLAMA_OPTIONS,
     }
+    if model_picker.is_hybrid_thinker(payload["model"]):
+        # these reason at length before answering unless told not to
+        payload["think"] = False
 
     # 300s, not 120s — a longer, multi-step request (or a longer context from
     # facts/notes/ambient window info) can genuinely take a while to even
@@ -848,6 +865,14 @@ def think(instruction, history, on_chunk=None, cancel_check=None):
     try:
         if on_chunk:
             resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT, stream=True)
+            if resp.status_code == 400 and "think" in payload and "think" in resp.text.lower():
+                # an older Ollama that doesn't know the option: ask again without it
+                payload.pop("think")
+                resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT, stream=True)
+            if resp.status_code == 404:
+                return {"actions": [], "reply": (
+                    f"The model {payload['model']} isn't installed. Run: ollama pull {payload['model']}"
+                    " — or pick another model in Settings."), "mood": "concerned"}
             resp.raise_for_status()
             raw = ""
             for line in resp.iter_lines():
@@ -3388,7 +3413,7 @@ class AssistantWindow(Gtk.Window):
         model_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         model_row.pack_start(Gtk.Label(label="Ollama model override"), False, False, 0)
         self.settings_model_entry = Gtk.Entry()
-        self.settings_model_entry.set_placeholder_text(f"blank = {OLLAMA_MODEL}")
+        self.settings_model_entry.set_placeholder_text("blank = the best one you have installed")
         self.settings_model_entry.set_text(SETTINGS.get("ollama_model", ""))
         model_row.pack_start(self.settings_model_entry, True, True, 0)
         settings_page.pack_start(model_row, False, False, 0)
@@ -4713,6 +4738,17 @@ class AssistantWindow(Gtk.Window):
         has_key = bool(SETTINGS.get("cloud_api_key", "").strip())
         use_cloud = (self.smart_mode_active or force_cloud) and has_key
         think_fn = think_cloud if use_cloud else think
+
+        # Obvious one-step requests skip the model entirely (fast_path.py).
+        quick = (fast_path.match(text, ALLOWED_APPS)
+                 if SETTINGS.get("fast_path_enabled", True) and not use_cloud else None)
+        if quick is not None:
+            if self.voice.enabled:
+                self.voice.speak(quick["reply"])
+                self._voice_spoken_len = len(quick["reply"])
+            actions_succeeded = self._execute_actions(quick["actions"])
+            GLib.idle_add(self.finish_response, text, quick, actions_succeeded)
+            return False
         if use_cloud:
             GLib.idle_add(self.island.show_island, "Asking the cloud AI…")
 

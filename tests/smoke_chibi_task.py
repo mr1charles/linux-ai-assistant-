@@ -141,6 +141,23 @@ try:
         errors.append("the stage window was left up after the chibi left")
     if win.face.state == app.State.SLEEPING and win.get_visible():
         errors.append("the face never came back into the pill")
+    # -- the fast path: "open youtube" never touches the model ---------------
+    calls.clear()
+    app.think = lambda *a, **k: errors.append("the model was called for 'open youtube'") or {
+        "actions": [], "reply": "", "mood": "neutral"}
+    win.task_label_text = "open youtube"
+    win.task_steps = [("Thinking", "current")]
+    started = time.monotonic()
+    fast = threading.Thread(target=win.process, args=("hey toby, open youtube please",))
+    fast.start()
+    pump(10, until=lambda: not fast.is_alive())
+    pump(0.3)
+    if calls != [("open", "https://www.youtube.com")]:
+        errors.append(f"the fast path didn't open YouTube: {calls}")
+    if win.answer.get_text() != "Opening YouTube.":
+        errors.append(f"the fast path reply didn't show: {win.answer.get_text()!r}")
+    pump(8, until=lambda: not win.chibi_director.visible)
+
     print(f"a mid-task frame is at {workdir}/chibi_mid_task.png" if frame_saved[0]
           else "no mid-task frame captured")
 except Exception:
