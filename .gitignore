@@ -1,0 +1,22 @@
+.env
+vosk-model-small-en-us-0.15/
+__pycache__/
+*.pyc
+
+# Personal data Toby generates at runtime — never belongs in a public repo
+history.json
+knowledge.json
+study_notes.json
+school_mode.json
+settings.json
+camera_gestures.json
+session_log.md
+knowledge_tree.png
+knowledge_bubbles.png
+
+# Downloaded model files (large, and install.sh fetches them automatically)
+hand_landmarker.task
+face_landmarker.task
+
+# Study plan data (generated at runtime, personal)
+study_plan.json
