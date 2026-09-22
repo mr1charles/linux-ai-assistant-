@@ -5661,20 +5661,40 @@ class AssistantWindow(Gtk.Window):
         fight.
         """
         t0 = time.monotonic()
+        finished = [False]
+
+        def finish():
+            if finished[0]:
+                return
+            finished[0] = True
+            self.outer.set_opacity(end)
+            if on_done:
+                on_done()
 
         def step(_widget, _clock):
-            if gen != self._panel_generation:
+            if gen != self._panel_generation or finished[0]:
                 return GLib.SOURCE_REMOVE
             t = (time.monotonic() - t0) / max(0.001, duration)
             self.outer.set_opacity(lerp(start, end, curve(t)))
             if t >= 1.0:
-                if on_done:
-                    on_done()
+                finish()
                 return GLib.SOURCE_REMOVE
             return GLib.SOURCE_CONTINUE
 
         self.outer.set_opacity(start)
         self.outer.add_tick_callback(step)
+
+        # Frame callbacks stop when the screen locks or the display sleeps.
+        # If that happens mid-fade, finish on the clock instead, so the pill
+        # can never be left invisible or half-hidden. Completion is tracked
+        # explicitly: a fade from 0 to 0 (hiding right after showing) is
+        # still a fade that has to call on_done.
+        def finish_anyway():
+            if gen == self._panel_generation:
+                finish()
+            return False
+
+        GLib.timeout_add(int(duration * 1000) + 250, finish_anyway)
 
     def show_panel(self):
         self._panel_generation += 1

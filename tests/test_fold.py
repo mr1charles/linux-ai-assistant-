@@ -120,6 +120,20 @@ clock.advance(tf.HARD_RELEASE_CAP_S + 0.01)
 c.tick()   # a single late frame, as if the compositor stalled
 check("a stalled animation still releases the lock by the deadline", lock.held, False)
 
+# -- ...and even if not a single frame ever arrives ---------------------------
+c, clock, view, lock = make()
+c.on_sleep()
+clock.advance(tf.HARD_RELEASE_CAP_S + 0.01)
+c.check_deadlines()   # the clock timer, with the compositor sending no frames at all
+check("with no frames at all, the clock timer still releases the lock", lock.held, False)
+
+c, clock, view, lock = make()
+c.on_sleep()
+run_frames(c, clock, 1.0)
+clock.advance(tf.FOLDED_WATCHDOG_S + 1)
+c.check_deadlines()
+check("a suspend that never comes is noticed without frames too", c.state, c.UNFOLDING)
+
 # -- a failed screenshot means no animation and no delay ---------------------
 c, clock, view, lock = make(capture=lambda: None)
 c.on_sleep()

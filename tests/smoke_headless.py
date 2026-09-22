@@ -310,6 +310,23 @@ if win is not None:
         if win._hiding:
             errors.append("toggling during a fade-out didn't bring the panel back")
         win._finish_hide(win._panel_generation)
+
+        # With no frames arriving at all (a locked screen), the fade must
+        # still finish on the clock. Nothing here pumps the frame clock, so
+        # only the fallback timer can complete it.
+        win.show_panel()
+        real_tick = win.outer.add_tick_callback
+        win.outer.add_tick_callback = lambda *_a: 0   # the compositor sends no frames
+        win.hide_panel()
+        ctx = GLib.MainContext.default()
+        import time as _t
+        end = _t.monotonic() + 1.2
+        while _t.monotonic() < end and win._hiding:
+            ctx.iteration(False)
+            _t.sleep(0.01)
+        if win._hiding or win.get_visible():
+            errors.append("a fade-out with no frames never finished; the pill was left up")
+        win.outer.add_tick_callback = real_tick
     except Exception:
         errors.append("face animations: " + traceback.format_exc())
 

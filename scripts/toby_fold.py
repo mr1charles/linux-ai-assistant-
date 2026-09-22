@@ -242,6 +242,26 @@ class FoldController:
             return False
         return True
 
+    def check_deadlines(self):
+        """The timing checks that must not depend on frames being drawn.
+
+        Compositors stop sending frame callbacks when a display turns off or
+        the screen locks — exactly what happens around a lid closing — so
+        tick() can't be the only thing that releases the sleep lock or
+        notices a suspend that never came. The overlay calls this from a
+        plain clock timer as well. Returns True while it should keep being
+        called.
+        """
+        now = self.clock()
+        if self._release_deadline is not None and now >= self._release_deadline:
+            self._release("deadline (no frames)")
+        if self.state in (self.FOLDED, self.FADING) and self._folded_since is not None \
+                and now - self._folded_since > FOLDED_WATCHDOG_S:
+            self._note(now, "watchdog (no frames): unfolding")
+            self.state = self.UNFOLDING
+            self._last_tick = now
+        return self.state != self.IDLE
+
     def draw_failed(self, error):
         """The view calls this if rendering a frame raised."""
         self._fail(f"draw failed: {error!r}")
@@ -436,6 +456,16 @@ def make_overlay_class():
                 gdk_window.input_shape_combine_region(cairo.Region(), 0, 0)
             if self._tick_id is None:
                 self._tick_id = self.area.add_tick_callback(self._on_tick)
+            if getattr(self, "_watchdog_id", None) is None:
+                self._watchdog_id = GLib.timeout_add(100, self._on_watchdog)
+
+        def _on_watchdog(self):
+            keep = self.controller.check_deadlines()
+            if self.controller.state == self.controller.UNFOLDING and self._tick_id is None:
+                self._tick_id = self.area.add_tick_callback(self._on_tick)
+            if not keep:
+                self._watchdog_id = None
+            return keep
 
         def hide(self):
             if self._tick_id is not None:
