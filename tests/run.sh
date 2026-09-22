@@ -123,6 +123,13 @@ else
     echo "   skipped: xvfb-run not installed"
 fi
 
+echo "== idle CPU use =="
+if command -v xvfb-run >/dev/null 2>&1; then
+    tmp_home="$(make_home)"
+    HOME="$tmp_home" xvfb-run -a "$PY" tests/perf_idle.py || status=1
+    rm -rf "$tmp_home"
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "== all checks passed =="
 else

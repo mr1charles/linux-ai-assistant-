@@ -745,7 +745,15 @@ def make_stage_class():
         def _invalidate(self):
             d = self.director
             x, y, w, h = d.bounds()
-            rects = [(x, y, w, h), self._card_rect()]
+            rects = [(x, y, w, h)]
+            # The card only changes when a step does; between those, only its
+            # pulsing marker moves, and a quarter of the frames is plenty for
+            # that. Redrawing it every frame was most of the stage's cost.
+            self._frame = getattr(self, "_frame", 0) + 1
+            signature = (d.title, tuple(d.steps), round(d.alpha, 2))
+            if signature != getattr(self, "_card_signature", None) or self._frame % 4 == 0:
+                self._card_signature = signature
+                rects.append(self._card_rect())
             if self._last_dirty:
                 rects.append(self._last_dirty)
             for rx, ry, rw, rh in rects:
