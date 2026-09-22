@@ -53,6 +53,8 @@ import school_mode
 import toby_settings
 import voice_engine
 import camera_engine
+import chibi
+import toby_anim
 
 SETTINGS = toby_settings.load()
 
@@ -491,6 +493,56 @@ DISPATCH = {
     "disable_study_mode": lambda a: study_mode_state.disable(),
     "set_school_schedule": lambda a: school_mode.set_day_schedule(a["day"], a["start"], a["end"]),
 }
+
+
+def describe_action(action):
+    """A short, plain label for one step — what the checklist shows.
+
+    The model's tool names ("open_url", "key_press") mean nothing to anyone
+    reading over Toby's shoulder; "Open youtube.com" does.
+    """
+    tool = action.get("tool", "")
+    def short(text, n=34):
+        text = str(text or "").strip()
+        return text if len(text) <= n else text[: n - 1] + "…"
+
+    if tool == "open_url":
+        url = str(action.get("url", "")).replace("https://", "").replace("http://", "")
+        return f"Open {short(url.rstrip('/'))}"
+    if tool == "open_app":
+        return f"Open {short(action.get('command', 'an app'))}"
+    if tool == "type_text":
+        return f'Type "{short(action.get("text", ""), 26)}"'
+    if tool == "key_press":
+        return f"Press {short(action.get('keys', '')).upper()}"
+    if tool == "click_mouse":
+        button = action.get("button", "left")
+        return "Click" if button == "left" else f"{button.capitalize()}-click"
+    if tool == "move_mouse":
+        return "Move the pointer"
+    labels = {
+        "send_discord_message": "Send the Discord message",
+        "close_active_window": "Close this window",
+        "close_tab": "Close this tab",
+        "read_emails": "Check your email",
+        "read_screen": "Read your screen",
+        "install_package": f"Install {short(action.get('package', 'a package'))}",
+        "show_knowledge_tree": "Show what I know about you",
+        "show_knowledge_bubbles": "Show what I know about you",
+        "add_study_note": f"Save a {short(action.get('subject', 'study'), 16)} note",
+        "enable_study_mode": "Turn on Study Mode",
+        "disable_study_mode": "Turn off Study Mode",
+        "set_school_schedule": f"Set {short(action.get('day', ''), 12).capitalize()}'s schedule",
+        "disable_control": "Hand back the mouse and keyboard",
+    }
+    return labels.get(tool, tool.replace("_", " ").capitalize() or "Step")
+
+
+# Tools where Toby visibly acts on the screen. For these the chibi comes out
+# and does the work in view; for purely informational ones (checking email,
+# saving a note) there's nothing on screen to walk to.
+PHYSICAL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press", "open_url",
+                  "open_app", "close_tab", "close_active_window", "send_discord_message"}
 
 
 def load_history():
@@ -3525,6 +3577,10 @@ class AssistantWindow(Gtk.Window):
             on_gesture=self.on_camera_gesture,
             on_state=self.on_camera_state,
         )
+        self.chibi_director = chibi.ChibiDirector(toby_anim.animation_settings(SETTINGS))
+        ChibiStage = chibi.make_stage_class()
+        self.chibi_stage = ChibiStage(self.chibi_director, accent_getter=lambda: ACCENT_RGB)
+
         self.camera_overlay = CameraOverlay()
         self._camera_recording_name = None
         self._pending_camera_action_for_record = None
@@ -3557,6 +3613,10 @@ class AssistantWindow(Gtk.Window):
         if len(saved_accent) == 7 and saved_accent.startswith("#"):
             self.apply_accent_color(saved_accent)
 
+    def _publish_remote_state(self):
+        """Overridden once the phone bridge exists; a no-op until then."""
+        return False
+
     def on_island_click(self):
         self.show_panel()
 
@@ -3586,6 +3646,8 @@ class AssistantWindow(Gtk.Window):
             self.task_steps[index] = (label, status)
         if self.island_expanded.get_visible():
             self.island_expanded.set_task(self.task_label_text, self.task_steps)
+        self._sync_chibi_steps()
+        self._publish_remote_state()
 
     # -- animation driver --------------------------------------------------
     def tick(self):
@@ -4592,6 +4654,10 @@ class AssistantWindow(Gtk.Window):
         GLib.idle_add(self._set_task_step_status, 0, "done")  # "Thinking" step complete
         GLib.idle_add(self._extend_task_steps, actions)
 
+        if self._chibi_enabled() and any(a.get("tool") in PHYSICAL_TOOLS for a in actions):
+            GLib.idle_add(self._chibi_begin)
+            time.sleep(toby_anim.animation_settings(SETTINGS)["chibi_transform_duration"] * 0.8)
+
         for i, action in enumerate(actions):
             if self.task_cancelled:
                 GLib.idle_add(self._set_task_step_status, i + 1, "error")
@@ -4601,6 +4667,10 @@ class AssistantWindow(Gtk.Window):
             if not fn:
                 GLib.idle_add(self._set_task_step_status, i + 1, "error")
                 continue
+            try:
+                self._chibi_choreograph(action)
+            except Exception as e:
+                print("CHIBI ERROR:", e, flush=True)   # never let the show stop the task
             try:
                 result_summary = fn(action)
                 note_recent_action(action.get("tool", "?"), str(result_summary)[:80])
@@ -4631,10 +4701,123 @@ class AssistantWindow(Gtk.Window):
         return actions_succeeded
 
     def _extend_task_steps(self, actions):
-        self.task_steps += [(a.get("tool", "?"), "pending") for a in actions]
+        self.task_steps += [(describe_action(a), "pending") for a in actions]
         if self.island_expanded.get_visible():
             self.island_expanded.set_task(self.task_label_text, self.task_steps)
+        self._sync_chibi_steps()
         return False
+
+    # -- the chibi doing the task ----------------------------------------------
+    def _chibi_enabled(self):
+        return toby_anim.animation_settings(SETTINGS)["chibi_enabled"]
+
+    def _sync_chibi_steps(self):
+        """The chibi's checklist is the task list minus the 'Thinking' step."""
+        if self.chibi_director.visible:
+            steps = [s for s in self.task_steps if s[0] != "Thinking"]
+            self.chibi_director.set_steps(self._chibi_title(), steps)
+            self.chibi_stage.start()
+        return False
+
+    def _chibi_title(self):
+        title = self.task_label_text.replace("[Smart] ", "")
+        return title[:1].upper() + title[1:] if title else "Working on it"
+
+    def _face_screen_position(self):
+        """Where the face sits on screen, so the chibi pops out of it."""
+        screen = self.get_screen()
+        sw, sh = screen.get_width(), screen.get_height()
+        if not self.get_visible():
+            return sw / 2, sh - 40
+        try:
+            fx, fy = self.face.translate_coordinates(self, 0, 0) or (0, 0)
+            win_w = self.get_allocated_width()
+            win_h = self.get_allocated_height()
+            face = self.face.get_allocation()
+            x = (sw - win_w) / 2 + fx + face.width / 2
+            y = sh - 55 - win_h + fy + face.height
+            return x, y
+        except Exception:
+            return sw / 2, sh - 80
+
+    def _chibi_begin(self):
+        """The face leaves the pill and grows a body on the stage."""
+        if self.chibi_director.visible:
+            return False
+        x, y = self._face_screen_position()
+        steps = [s for s in self.task_steps if s[0] != "Thinking"]
+        self.chibi_director.reload(toby_anim.animation_settings(SETTINGS))
+        self.chibi_director.emerge(x, y, self._chibi_title(), steps)
+        self.chibi_stage.start()
+        self.face.set_state(State.SLEEPING)   # the head has left the pill
+        return False
+
+    def _chibi_end(self, reply_text=""):
+        if not self.chibi_director.visible:
+            return False
+        if reply_text:
+            self.chibi_director.say(reply_text[:140])
+            GLib.timeout_add(1600, self._chibi_finish_now)
+        else:
+            self._chibi_finish_now()
+        return False
+
+    def _chibi_finish_now(self):
+        self.chibi_director.finish()
+        # the face comes back into the pill as the chibi flies home
+        delay = int(toby_anim.animation_settings(SETTINGS)["chibi_transform_duration"] * 1000) + 700
+        GLib.timeout_add(delay, self._chibi_returned)
+        return False
+
+    def _chibi_returned(self):
+        if self.get_visible():
+            self.face.set_state(State.IDLE)
+        self.face.pulse_happy()
+        return False
+
+    def _chibi_choreograph(self, action):
+        """Runs on the task thread before each step: walk there, get ready.
+
+        Every wait is bounded, so an animation that stalls or a chibi that
+        is turned off mid-task can only ever make a step start a moment
+        later — never stop it from running.
+        """
+        if not self.chibi_director.visible:
+            return
+        tool = action.get("tool")
+        screen = self.get_screen()
+        sw, sh = screen.get_width(), screen.get_height()
+
+        def on_main(fn, *args):
+            GLib.idle_add(lambda: fn(*args) and False)
+
+        # the bubble always names the step being done right now
+        on_main(self.chibi_director.say, describe_action(action))
+
+        if tool == "move_mouse":
+            tx = float(action.get("x", 0.5)) * sw
+            ty = float(action.get("y", 0.5)) * sh
+            arrived = threading.Event()
+            on_main(self.chibi_director.walk_to, tx, ty, arrived)
+            arrived.wait(timeout=4.0)
+        elif tool == "click_mouse":
+            tx = screen_control.current_x_frac * sw
+            ty = screen_control.current_y_frac * sh
+            arrived = threading.Event()
+            on_main(self.chibi_director.walk_to, tx, ty, arrived)
+            arrived.wait(timeout=4.0)
+            on_main(self.chibi_director.perform, "press", 0.4, "reach")
+            time.sleep(0.12)   # let the tap land visibly before the click does
+        elif tool in ("type_text", "key_press"):
+            length = len(str(action.get("text", action.get("keys", ""))))
+            on_main(self.chibi_director.perform, "type", min(3.0, 0.5 + length * 0.04))
+            time.sleep(0.25)
+        elif tool in ("open_url", "open_app"):
+            on_main(self.chibi_director.perform, "reach", 0.6)
+            time.sleep(0.3)
+        else:
+            on_main(self.chibi_director.perform, "think", 0.5)
+            time.sleep(0.15)
 
     def _show_confirm_dialog(self):
         self.island.hide_island()
@@ -4655,6 +4838,7 @@ class AssistantWindow(Gtk.Window):
 
     def finish_cancelled(self):
         self._set_task_step_status(self._current_step_index(), "error")
+        self._chibi_end()
         self.face.set_state(State.IDLE)
         self.answer.set_text("Cancelled.")
         self.answer.set_visible(True)
@@ -4665,6 +4849,7 @@ class AssistantWindow(Gtk.Window):
 
     def finish_response(self, text, result, actions_succeeded=0):
         self._waiting_for_first_chunk = False  # safety net in case no partial "reply" text ever streamed
+        self._chibi_end(result.get("reply", "") if not self.task_cancelled else "")
 
         self.current_mood = result.get("mood", "neutral")
         self.face.set_state(State.RESPONDING)

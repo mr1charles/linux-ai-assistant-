@@ -32,6 +32,23 @@ DEFAULTS = {
     "cloud_model": "gpt-4o",
     "voice_auto_cloud": False,          # opt-in: voice-triggered requests use cloud automatically for speed+quality
     "grade_level": "9th-10th",         # adjusts explanation complexity for study features
+
+    # -- speed ---------------------------------------------------------------
+    "fast_path_enabled": True,         # obvious one-step commands ("open youtube", "close this tab")
+                                        # run instantly without waiting on the model
+
+    # -- the chibi and the look ----------------------------------------------
+    "startup_greeting": True,          # Toby pops up briefly when you log in, then tucks away
+    "animations": {},                  # overrides for toby_anim.ANIMATION_DEFAULTS — see README
+
+    # -- fingerprint ---------------------------------------------------------
+    "confirm_with_fingerprint": False, # approve mouse/keyboard/install prompts with fprintd
+                                        # instead of (as well as) the Yes button
+
+    # -- phone app -----------------------------------------------------------
+    "remote_enabled": False,           # the phone app bridge — off until you pair a phone
+    "remote_port": 8765,
+    "remote_bind": "127.0.0.1",        # loopback only; Tailscale serve publishes it privately
 }
 
 GRADE_LEVELS = ["5th-6th", "7th-8th", "9th-10th", "11th-12th", "College"]
@@ -52,12 +69,20 @@ RESPONSE_STYLES = ["concise", "balanced", "detailed"]
 
 
 def load() -> dict:
-    settings = dict(DEFAULTS)
+    settings = {k: (dict(v) if isinstance(v, dict) else v) for k, v in DEFAULTS.items()}
     if SETTINGS_PATH.exists():
         try:
             saved = json.loads(SETTINGS_PATH.read_text())
             if isinstance(saved, dict):
-                settings.update({k: v for k, v in saved.items() if k in DEFAULTS})
+                for key, value in saved.items():
+                    if key not in DEFAULTS:
+                        continue
+                    if isinstance(DEFAULTS[key], dict) and isinstance(value, dict):
+                        # nested groups (animations) merge rather than replace,
+                        # so one saved override doesn't drop every other default
+                        settings[key] = {**DEFAULTS[key], **value}
+                    else:
+                        settings[key] = value
         except (json.JSONDecodeError, OSError):
             pass
     return settings

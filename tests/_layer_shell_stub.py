@@ -56,6 +56,7 @@ def install():
     stub.get_margin = lambda window, edge: margins.get((id(window), edge), 0)
     stub.set_keyboard_mode = lambda window, mode: None
     stub.set_exclusive_zone = lambda window, zone: None
+    stub.set_monitor = lambda window, monitor: None
 
     import gi.repository
 

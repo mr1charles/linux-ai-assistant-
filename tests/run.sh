@@ -58,6 +58,12 @@ echo "== screen control checks =="
 echo "== memory graph layout checks =="
 "$PY" tests/test_knowledge_graph.py || status=1
 
+echo "== lid fold state machine checks =="
+"$PY" tests/test_fold.py || status=1
+
+echo "== chibi motion and drawing checks =="
+"$PY" tests/test_chibi.py || status=1
+
 echo "== GTK CSS parse check =="
 if command -v xvfb-run >/dev/null 2>&1; then
     xvfb-run -a "$PY" tests/css_check.py || status=1
@@ -78,6 +84,22 @@ echo "== headless UI smoke test =="
 if command -v xvfb-run >/dev/null 2>&1; then
     tmp_home="$(make_home)"
     HOME="$tmp_home" xvfb-run -a "$PY" tests/smoke_headless.py || status=1
+    rm -rf "$tmp_home"
+else
+    echo "   skipped: xvfb-run not installed"
+fi
+
+echo "== fold overlay window =="
+if command -v xvfb-run >/dev/null 2>&1; then
+    xvfb-run -a "$PY" tests/smoke_fold_overlay.py || status=1
+else
+    echo "   skipped: xvfb-run not installed"
+fi
+
+echo "== a real task with the chibi =="
+if command -v xvfb-run >/dev/null 2>&1; then
+    tmp_home="$(make_home)"
+    HOME="$tmp_home" xvfb-run -a -s "-screen 0 1280x1024x24" "$PY" tests/smoke_chibi_task.py || status=1
     rm -rf "$tmp_home"
 else
     echo "   skipped: xvfb-run not installed"
