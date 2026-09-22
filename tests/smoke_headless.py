@@ -313,6 +313,29 @@ if win is not None:
     except Exception:
         errors.append("face animations: " + traceback.format_exc())
 
+# -- animation settings save and take effect ---------------------------------
+if win is not None:
+    try:
+        win.animation_switches["idle_enabled"].set_active(False)
+        win.animation_sliders["fold_close_duration"].set_value(0.9)
+        win.animation_sliders["interaction_intensity"].set_value(0.0)
+        win.on_settings_save_clicked()
+        saved = app.toby_settings.load()["animations"]
+        if saved.get("idle_enabled") is not False or abs(saved.get("fold_close_duration", 0) - 0.9) > 1e-6:
+            errors.append(f"animation settings didn't save: {saved}")
+        if win.face.anim["idle_enabled"]:
+            errors.append("turning idle life off didn't reach the face")
+        before = win.face.squash.velocity
+        win.face.tap()
+        if win.face.squash.velocity != before:
+            errors.append("tap reaction still happens at intensity 0")
+        win._reset_animation_controls()
+        win.on_settings_save_clicked()
+        if not win.face.anim["idle_enabled"]:
+            errors.append("resetting to defaults didn't turn idle life back on")
+    except Exception:
+        errors.append("animation settings: " + traceback.format_exc())
+
 # -- the island shows task progress -----------------------------------------
 if win is not None:
     try:

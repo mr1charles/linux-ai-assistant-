@@ -3668,6 +3668,8 @@ class AssistantWindow(Gtk.Window):
         camera_record_hint.get_style_context().add_class("apple-agent-dashboard-title")
         settings_page.pack_start(camera_record_hint, False, False, 4)
 
+        self._build_animation_settings(settings_page)
+
         fp_separator = Gtk.Label(label="Fingerprint")
         fp_separator.set_xalign(0)
         fp_separator.get_style_context().add_class("apple-agent-section-heading")
@@ -4293,6 +4295,9 @@ class AssistantWindow(Gtk.Window):
         SETTINGS["cloud_api_key"] = self.settings_cloud_key_entry.get_text().strip()
         SETTINGS["cloud_model"] = self.settings_cloud_model_entry.get_text().strip() or "gpt-4o"
         SETTINGS["voice_auto_cloud"] = self.settings_voice_auto_cloud_switch.get_active()
+        animations_before = toby_anim.animation_settings(SETTINGS)
+        SETTINGS["animations"] = {**SETTINGS.get("animations", {}), **self._collect_animation_settings()}
+        self._apply_animation_settings(animations_before)
         SETTINGS["confirm_with_fingerprint"] = self.settings_fingerprint_switch.get_active()
         if SETTINGS["confirm_with_fingerprint"]:
             self._check_fingerprint_reader()
@@ -4300,6 +4305,128 @@ class AssistantWindow(Gtk.Window):
         toby_settings.save(SETTINGS)
         self.settings_save_status.set_text("Saved.")
         GLib.timeout_add_seconds(3, lambda: self.settings_save_status.set_text("") or False)
+
+    # -- animation settings ------------------------------------------------------
+    ANIMATION_SWITCHES = [
+        ("enabled", "Animations"),
+        ("fold_enabled", "Lid fold when the laptop sleeps"),
+        ("chibi_enabled", "Toby walks out and does tasks on screen"),
+        ("idle_enabled", "Idle life (breathing, blinking)"),
+        ("desktop_reactions", "React when windows and workspaces change"),
+        ("appear_enabled", "Fade in and out"),
+        ("hypr_animations_enabled", "Toby-style window and workspace animations"),
+    ]
+    ANIMATION_SLIDERS = [
+        # key, label, low, high, step, how to show the value
+        ("fold_close_duration", "Fold speed", 0.3, 1.2, 0.02, lambda v: f"{v:.2f}s"),
+        ("fold_strength", "Fold strength", 0.0, 1.5, 0.05, lambda v: f"{v:.0%}"),
+        ("fold_perspective", "Fold perspective", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("fold_blur", "Motion blur", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("fold_zoom", "Shrink toward centre", 0.0, 0.2, 0.01, lambda v: f"{v:.0%}"),
+        ("idle_intensity", "Idle liveliness", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("interaction_intensity", "Tap reaction", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("chibi_walk_speed", "Walking speed", 300.0, 2000.0, 50.0, lambda v: f"{v:.0f} px/s"),
+    ]
+
+    def _build_animation_settings(self, page):
+        heading = Gtk.Label(label="Animations")
+        heading.set_xalign(0)
+        heading.get_style_context().add_class("apple-agent-section-heading")
+        page.pack_start(heading, False, False, 6)
+        current = toby_anim.animation_settings(SETTINGS)
+
+        self.animation_switches = {}
+        for key, label in self.ANIMATION_SWITCHES:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.pack_start(Gtk.Label(label=label), False, False, 0)
+            switch = Gtk.Switch()
+            switch.set_active(bool(SETTINGS.get("animations", {}).get(
+                key, toby_anim.ANIMATION_DEFAULTS[key])))
+            row.pack_end(switch, False, False, 0)
+            page.pack_start(row, False, False, 0)
+            self.animation_switches[key] = switch
+
+        self.animation_sliders = {}
+        grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+        for i, (key, label, low, high, step, fmt) in enumerate(self.ANIMATION_SLIDERS):
+            name = Gtk.Label(label=label)
+            name.set_xalign(0)
+            scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, low, high, step)
+            scale.set_draw_value(False)
+            scale.set_hexpand(True)
+            scale.set_value(current[key])
+            value = Gtk.Label(label=fmt(current[key]))
+            value.set_xalign(1)
+            value.set_width_chars(8)
+            value.get_style_context().add_class("apple-agent-dashboard-title")
+            scale.connect("value-changed", lambda sc, lbl=value, f=fmt: lbl.set_text(f(sc.get_value())))
+            grid.attach(name, 0, i, 1, 1)
+            grid.attach(scale, 1, i, 1, 1)
+            grid.attach(value, 2, i, 1, 1)
+            self.animation_sliders[key] = scale
+        page.pack_start(grid, False, False, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        preview = Gtk.Button(label="Preview the fold")
+        preview.get_style_context().add_class("apple-agent-panel-button")
+        preview.connect("clicked", lambda *_: self._preview_fold())
+        buttons.pack_start(preview, False, False, 0)
+        defaults = Gtk.Button(label="Reset to defaults")
+        defaults.get_style_context().add_class("apple-agent-panel-button")
+        defaults.connect("clicked", lambda *_: self._reset_animation_controls())
+        buttons.pack_start(defaults, False, False, 0)
+        page.pack_start(buttons, False, False, 4)
+
+        note = Gtk.Label(
+            label="The fold plays when the laptop goes to sleep, and in reverse when it wakes. "
+                  "Because the lid only reports closing when it's nearly shut, you'll mostly "
+                  "see the unfold; Preview shows the whole thing, and `toby sleep` plays it "
+                  "in full before suspending. Window animations change only the running "
+                  "Hyprland and never your config.")
+        note.set_xalign(0)
+        note.set_line_wrap(True)
+        note.get_style_context().add_class("apple-agent-dashboard-title")
+        page.pack_start(note, False, False, 4)
+
+    def _reset_animation_controls(self):
+        for key, switch in self.animation_switches.items():
+            switch.set_active(bool(toby_anim.ANIMATION_DEFAULTS[key]))
+        for key, scale in self.animation_sliders.items():
+            scale.set_value(toby_anim.ANIMATION_DEFAULTS[key])
+
+    def _collect_animation_settings(self):
+        values = {}
+        for key, switch in self.animation_switches.items():
+            values[key] = switch.get_active()
+        for key, scale in self.animation_sliders.items():
+            values[key] = round(float(scale.get_value()), 3)
+        # opening takes a little longer than closing, as it did by default
+        values["fold_open_duration"] = round(values["fold_close_duration"] * 1.16, 3)
+        return values
+
+    def _apply_animation_settings(self, before):
+        """Push saved animation settings to everything that uses them."""
+        after = toby_anim.animation_settings(SETTINGS)
+        self.face.reload_animation_settings()
+        self.chibi_director.reload(after)
+        # the fold daemon re-reads settings on SIGHUP
+        subprocess.Popen(["pkill", "-HUP", "-f", "toby_fold.py"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if after["hypr_animations_enabled"] != before["hypr_animations_enabled"] or (
+                after["hypr_animations_enabled"]
+                and after["hypr_animation_speed"] != before["hypr_animation_speed"]):
+            def worker():
+                if after["hypr_animations_enabled"]:
+                    hypr_animations.apply(after["hypr_animation_speed"])
+                else:
+                    hypr_animations.restore()
+            threading.Thread(target=worker, daemon=True).start()
+
+    def _preview_fold(self):
+        found = subprocess.run(["pkill", "-USR2", "-f", "toby_fold.py"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        if not found:
+            self.settings_save_status.set_text("The fold animation isn't running — start it with: toby start")
 
     def apply_accent_color(self, hex_color):
         """Rebuild the whole stylesheet around a new accent colour.
