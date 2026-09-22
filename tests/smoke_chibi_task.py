@@ -25,6 +25,7 @@ import cairo  # noqa: E402
 
 import chibi  # noqa: E402
 import linux_agent_apple as app  # noqa: E402
+app.SETTINGS["startup_greeting"] = False
 
 errors = []
 complaints = []

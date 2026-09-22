@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
-# Removes Little Toby's autostart/keybind and stops any running instance.
-# Does NOT delete ~/linux-agent, your .env, knowledge/notes data, or Ollama models.
-set -e
+# Removes Little Toby's services and command. Keeps your notes, memories,
+# settings, downloaded models and this folder, so reinstalling picks up
+# exactly where you left off. Delete ~/linux-agent yourself to remove those.
+set -u
+systemctl --user disable --now toby.service toby-fold.service 2>/dev/null
+rm -f "$HOME/.config/systemd/user/toby.service" "$HOME/.config/systemd/user/toby-fold.service"
+systemctl --user daemon-reload 2>/dev/null
+rm -f "$HOME/.local/bin/toby"
+command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1   # drops Toby's runtime keybind and animations
+if command -v tailscale >/dev/null; then tailscale serve reset >/dev/null 2>&1 || true; fi
 
-echo "== Little Toby uninstaller =="
-
-pkill -f linux_agent_apple.py 2>/dev/null && echo "-- Stopped running instance." || true
-
-systemctl --user disable --now linux-toby 2>/dev/null && echo "-- Disabled systemd user service." || true
-
-HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
-if [ -f "$HYPR_CONF" ] && grep -qF "Little Toby" "$HYPR_CONF"; then
-  cp "$HYPR_CONF" "$HYPR_CONF.bak.$(date +%s)"
-  sed -i '/# --- Little Toby ---/,+3d' "$HYPR_CONF"
-  echo "-- Removed Little Toby's block from hyprland.conf (backup saved alongside it)."
-  echo "   Reload Hyprland ('hyprctl reload') for the change to take effect."
+# Older versions appended a block to hyprland.conf; take it out if it's there.
+CONF="$HOME/.config/hypr/hyprland.conf"
+if [ -f "$CONF" ] && grep -qF "# --- Little Toby ---" "$CONF"; then
+  cp "$CONF" "$CONF.bak.$(date +%s)"
+  sed -i '/# --- Little Toby ---/,/^$/d' "$CONF"
+  echo "Removed the old Little Toby lines from hyprland.conf (a backup is next to it)."
 fi
-
-echo ""
-echo "Done. Your project files, .env, knowledge.json, study_notes.json, and"
-echo "session_log.md are still in $(dirname "${BASH_SOURCE[0]}") if you want to keep them"
-echo "or come back later — delete that folder manually to remove everything."
+echo "Little Toby is uninstalled. Your data is still in ~/linux-agent."

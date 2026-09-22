@@ -1,134 +1,152 @@
 #!/usr/bin/env bash
-# One-shot installer for Little Toby (Arch/CachyOS + Hyprland).
-# Run from the repo root: ./install.sh
-set -e
+# Little Toby installer — one command, one password prompt.
+#
+#   curl -fsSL https://raw.githubusercontent.com/mr1charles/linux-ai-assistant-/main/install.sh | bash
+#   or, from a checkout:  ./install.sh
+#
+# Options:  --update    refresh dependencies only (used by `toby update`)
+#           --no-models skip the AI and speech model downloads
+#           --phone     also install Tailscale for the phone app
+#
+# What it does, in order, and nothing else:
+#   1. installs system packages with pacman (the one sudo prompt)
+#   2. makes a private Python environment for Toby's own packages
+#   3. downloads the local AI model and the speech model
+#   4. installs the `toby` command and two user services, and starts them
+# It never edits your Hyprland config. The Super+G key is added to the
+# running compositor by Toby itself, only if that key is free.
+set -euo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VOSK_MODEL_URL="https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip"
-VOSK_MODEL_DIR="$REPO_DIR/vosk-model-small-en-us-0.15"
+REPO_URL="${TOBY_REPO:-https://github.com/mr1charles/linux-ai-assistant-.git}"
+BRANCH="${TOBY_BRANCH:-main}"
+DATA_DIR="$HOME/linux-agent"
 
-echo "== Little Toby installer =="
+UPDATE=0; MODELS=1; PHONE=0
+for arg in "$@"; do
+  case "$arg" in
+    --update) UPDATE=1 ;;
+    --no-models) MODELS=0 ;;
+    --phone) PHONE=1 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+  esac
+done
 
-if ! command -v pacman >/dev/null; then
-  echo "This installer targets Arch/CachyOS (pacman). Install the system packages"
-  echo "listed below manually for other distros, then re-run this script with"
-  echo "SKIP_SYSTEM_PACKAGES=1 to just handle Python deps + config:"
-  echo "  gtk3, gtk-layer-shell, python-gobject, python-cairo, espeak-ng, ollama,"
-  echo "  ydotool, grim, tesseract (+ eng language data)"
-fi
+step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
+warn() { printf '\033[1;33m    %s\033[0m\n' "$*"; }
 
-if [ -z "$SKIP_SYSTEM_PACKAGES" ] && command -v pacman >/dev/null; then
-  echo "-- Installing system packages (sudo required)"
-  sudo pacman -S --needed --noconfirm \
-    python python-pip \
-    gtk3 python-gobject gtk-layer-shell python-cairo \
-    espeak-ng \
-    ollama \
-    ydotool grim tesseract tesseract-data-eng
-
-  echo "-- Enabling ydotool daemon (needed for mouse/keyboard control + close_tab/close_active_window)"
-  sudo systemctl enable --now ydotool.service 2>/dev/null || \
-    echo "   Couldn't enable ydotool.service automatically — you may need to start ydotoold yourself."
-  # ydotool needs the user in the 'input' group to talk to /dev/uinput
-  sudo usermod -aG input "$USER" 2>/dev/null || true
-fi
-
-echo "-- Installing Python packages"
-pip install --user --break-system-packages -r "$REPO_DIR/requirements.txt" || {
-  echo "   Some packages failed — likely opencv-python or mediapipe (Camera Mode)."
-  echo "   Retrying without them so the rest of Toby still works..."
-  grep -vE '^(opencv-python|mediapipe)$' "$REPO_DIR/requirements.txt" > /tmp/toby-requirements-core.txt
-  pip install --user --break-system-packages -r /tmp/toby-requirements-core.txt
-  echo "   Camera Mode will report itself unavailable until mediapipe/opencv-python install"
-  echo "   successfully — try 'pip install --user --break-system-packages mediapipe opencv-python'"
-  echo "   yourself later; mediapipe support for brand-new Python releases sometimes lags."
-}
-
-echo "-- Setting up Ollama model (qwen2.5:7b-instruct, ~4.7GB — used for reliable JSON tool-calling)"
-if command -v ollama >/dev/null; then
-  (systemctl --user enable --now ollama 2>/dev/null || ollama serve >/tmp/ollama.log 2>&1 &)
-  sleep 2
-  ollama pull qwen2.5:7b-instruct || echo "Could not pull model automatically — run 'ollama pull qwen2.5:7b-instruct' manually."
-else
-  echo "ollama not found — install it, then run: ollama pull qwen2.5:7b-instruct"
-fi
-
-if [ ! -d "$VOSK_MODEL_DIR" ]; then
-  echo "-- Downloading offline speech model (~50MB, used only by voice/wake-word mode)"
-  curl -L "$VOSK_MODEL_URL" -o /tmp/vosk-model.zip
-  unzip -q /tmp/vosk-model.zip -d "$REPO_DIR"
-  rm /tmp/vosk-model.zip
-fi
-
-HAND_MODEL_URL="https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
-FACE_MODEL_URL="https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
-if [ ! -f "$REPO_DIR/hand_landmarker.task" ]; then
-  echo "-- Downloading hand tracking model (~8MB, used only by Camera Mode)"
-  curl -L "$HAND_MODEL_URL" -o "$REPO_DIR/hand_landmarker.task" || \
-    echo "   Couldn't download it — Camera Mode will report itself unavailable until this exists."
-fi
-if [ ! -f "$REPO_DIR/face_landmarker.task" ]; then
-  echo "-- Downloading face tracking model (~4MB, used only by Camera Mode)"
-  curl -L "$FACE_MODEL_URL" -o "$REPO_DIR/face_landmarker.task" || \
-    echo "   Couldn't download it — Camera Mode will report itself unavailable until this exists."
-fi
-
-if [ ! -f "$REPO_DIR/.env" ]; then
-  cp "$REPO_DIR/.env.example" "$REPO_DIR/.env"
-  echo "-- Created .env from template — edit it to add Discord/Gmail credentials (optional)"
-fi
-
-chmod +x "$REPO_DIR/scripts/"*.py
-
-# -- Hyprland keybind: Super+G to summon Toby ------------------------------
-HYPR_CONF="$HOME/.config/hypr/hyprland.conf"
-BIND_LINE="bind = SUPER, G, exec, pkill -SIGUSR1 -f linux_agent_apple.py"
-EXEC_LINE="exec-once = bash -c 'set -a; source $REPO_DIR/.env; set +a; python3 $REPO_DIR/scripts/linux_agent_apple.py'"
-BLUR_LINES=$'layerrule = blur, apple-agent\nlayerrule = ignorezero, apple-agent\nlayerrule = blur, apple-agent-island\nlayerrule = ignorezero, apple-agent-island\nlayerrule = blur, apple-agent-sidebar\nlayerrule = ignorezero, apple-agent-sidebar'
-
-if [ -f "$HYPR_CONF" ]; then
-  if grep -qF "linux_agent_apple.py" "$HYPR_CONF"; then
-    echo "-- hyprland.conf already references Little Toby — leaving it alone."
+# -- 0. get the code, if run straight from the web ---------------------------
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || echo "")"
+if [ -z "$SELF_DIR" ] || [ ! -f "$SELF_DIR/scripts/linux_agent_apple.py" ]; then
+  step "Downloading Little Toby into $DATA_DIR"
+  command -v git >/dev/null || sudo pacman -S --needed --noconfirm git
+  if [ -d "$DATA_DIR/.git" ]; then
+    git -C "$DATA_DIR" pull --ff-only
   else
-    read -r -p "-- Add the Super+G keybind + autostart to $HYPR_CONF now? [Y/n] " ans
-    ans="${ans:-Y}"
-    if [[ "$ans" =~ ^[Yy] ]]; then
-      cp "$HYPR_CONF" "$HYPR_CONF.bak.$(date +%s)"
-      {
-        echo ""
-        echo "# --- Little Toby ---"
-        echo "$BIND_LINE"
-        echo "$EXEC_LINE"
-        echo "$BLUR_LINES"
-      } >> "$HYPR_CONF"
-      echo "   Added (backup saved alongside hyprland.conf). Reload Hyprland (SUPER+SHIFT+R or"
-      echo "   'hyprctl reload') or log out/in for it to take effect."
-    else
-      echo "   Skipped — see below for the lines to add yourself."
-    fi
+    git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$DATA_DIR"
   fi
-else
-  echo "-- Couldn't find $HYPR_CONF — add these lines to your Hyprland config yourself:"
+  exec bash "$DATA_DIR/install.sh" "$@"
+fi
+REPO="$SELF_DIR"
+mkdir -p "$DATA_DIR"
+
+# -- 1. system packages ---------------------------------------------------------
+if ! command -v pacman >/dev/null; then
+  warn "This installer is for Arch-based systems (pacman). Install these yourself:"
+  warn "  python gtk3 python-gobject gtk-layer-shell python-cairo python-requests"
+  warn "  espeak-ng ollama ydotool grim tesseract tesseract-data-eng qrencode"
+  warn "then run this again with SKIP_SYSTEM_PACKAGES=1."
+  [ -n "${SKIP_SYSTEM_PACKAGES:-}" ] || exit 1
 fi
 
-echo ""
-echo "== Done =="
-echo "Try it right now:"
-echo "  cd $REPO_DIR"
-echo "  set -a; source .env; set +a       # bash/zsh — use 'source scripts/load-env.fish' on fish"
-echo "  python3 scripts/linux_agent_apple.py &          # Little Toby (recommended)"
-echo "  python3 scripts/linux_agent_assistant.py --assistant  # wake-word voice mode"
-echo ""
-echo "To toggle Toby from a Hyprland keybind (Super+G), make sure these lines are in"
-echo "~/.config/hypr/hyprland.conf:"
-echo "  $BIND_LINE"
-echo "  $EXEC_LINE"
-echo "  $BLUR_LINES"
-echo ""
-echo "Or run it as a systemd user service instead of exec-once:"
-echo "  cp systemd/linux-toby.service ~/.config/systemd/user/"
-echo "  systemctl --user enable --now linux-toby"
-echo ""
-echo "Double-click Toby's face to expand the sidebar (chat history, knowledge"
-echo "tree/bubbles, Study Mode badge). First mouse/keyboard control or package"
-echo "install request will ask for a one-time Yes/No confirmation."
+if [ -z "${SKIP_SYSTEM_PACKAGES:-}" ] && command -v pacman >/dev/null; then
+  step "Installing system packages (asks for your password once)"
+  PKGS=(python python-pip gtk3 python-gobject gtk-layer-shell python-cairo python-requests
+        python-numpy python-networkx python-matplotlib
+        espeak-ng ydotool grim tesseract tesseract-data-eng qrencode unzip curl git)
+  # ollama: use the GPU build if there's an NVIDIA card, plain otherwise
+  if lspci 2>/dev/null | grep -qi nvidia; then PKGS+=(ollama-cuda); else PKGS+=(ollama); fi
+  [ "$PHONE" = 1 ] && PKGS+=(tailscale)
+  sudo pacman -S --needed --noconfirm "${PKGS[@]}"
+
+  sudo systemctl enable --now ollama.service >/dev/null 2>&1 || warn "Couldn't start Ollama's service; run: sudo systemctl enable --now ollama"
+  [ "$PHONE" = 1 ] && { sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true; }
+  if ! id -nG "$USER" | grep -qw input; then
+    sudo usermod -aG input "$USER" && note "Added you to the input group (for mouse/keyboard control). Takes effect after you log out and in."
+  fi
+fi
+
+systemctl --user enable --now ydotool.service >/dev/null 2>&1 || note "ydotool's user service isn't available; mouse/keyboard control will ask you to start ydotoold."
+
+# -- 2. Python environment -------------------------------------------------------
+step "Setting up Toby's Python environment"
+# --system-site-packages so the GTK, Cairo and layer-shell bindings from
+# pacman are visible; Toby's own extras go in here and never touch the
+# system Python.
+if [ ! -x "$REPO/.venv/bin/python" ]; then
+  python3 -m venv --system-site-packages "$REPO/.venv"
+fi
+VPIP="$REPO/.venv/bin/pip"
+"$VPIP" install -q --upgrade pip >/dev/null
+"$VPIP" install -q requests pypdf vosk sounddevice || warn "Voice packages didn't install; Voice Mode will say so."
+if ! "$VPIP" install -q mediapipe opencv-python-headless >/dev/null 2>&1; then
+  warn "Camera Mode's packages (mediapipe) aren't available for this Python yet; everything else works."
+fi
+
+# -- 3. models --------------------------------------------------------------------
+if [ "$MODELS" = 1 ] && [ "$UPDATE" = 0 ]; then
+  step "Downloading the local AI model"
+  for _ in $(seq 1 15); do curl -s http://localhost:11434/api/tags >/dev/null && break; sleep 1; done
+  pulled=""
+  for model in qwen3:4b-instruct-2507-q4_K_M qwen3:4b-instruct qwen3:4b qwen2.5:7b-instruct; do
+    if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$model"; then pulled="$model"; break; fi
+    if ollama pull "$model"; then pulled="$model"; break; fi
+  done
+  [ -n "$pulled" ] && note "Using $pulled." || warn "Couldn't download a model. Later, run: toby model qwen3:4b-instruct"
+
+  VOSK_DIR="$DATA_DIR/vosk-model-small-en-us-0.15"
+  if [ ! -d "$VOSK_DIR" ]; then
+    step "Downloading the offline speech model (about 50 MB)"
+    tmp="$(mktemp)"
+    curl -fL "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" -o "$tmp" \
+      && unzip -q "$tmp" -d "$DATA_DIR" || warn "Couldn't download it; Voice Mode will say so."
+    rm -f "$tmp"
+  fi
+  for f in hand_landmarker face_landmarker; do
+    [ -f "$DATA_DIR/$f.task" ] && continue
+    kind="${f%_landmarker}"
+    curl -fsL "https://storage.googleapis.com/mediapipe-models/${kind}_landmarker/${kind}_landmarker/float16/1/$f.task" \
+      -o "$DATA_DIR/$f.task" || rm -f "$DATA_DIR/$f.task"
+  done
+fi
+
+[ -f "$REPO/.env" ] || cp "$REPO/.env.example" "$REPO/.env"
+chmod +x "$REPO/scripts/"*.py "$REPO/scripts/toby-session.sh" "$REPO/bin/toby"
+
+# -- 4. command and services --------------------------------------------------------
+step "Installing the toby command and services"
+mkdir -p "$HOME/.local/bin" "$HOME/.config/systemd/user"
+ln -sf "$REPO/bin/toby" "$HOME/.local/bin/toby"
+for unit in toby.service toby-fold.service; do
+  sed "s|@REPO@|$REPO|g" "$REPO/systemd/$unit" > "$HOME/.config/systemd/user/$unit"
+done
+started=1
+systemctl --user daemon-reload 2>/dev/null || started=0
+systemctl --user enable toby.service toby-fold.service >/dev/null 2>&1 || started=0
+systemctl --user restart toby.service toby-fold.service 2>/dev/null || started=0
+if [ "$started" = 0 ]; then
+  warn "Couldn't start the services from here (no user systemd session?)."
+  warn "They're installed; they'll start next time you log in, or run: toby start"
+fi
+
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) warn "Add ~/.local/bin to your PATH to use the toby command (fish: fish_add_path ~/.local/bin)" ;;
+esac
+
+step "Done"
+[ "$started" = 1 ] && note "Toby is running and starts by itself when you log in."
+note "Press Super+G to summon it, or run: toby"
+note "Check everything with: toby doctor"
+[ "$PHONE" = 1 ] && note "Pair your phone with: toby phone on"
+exit 0

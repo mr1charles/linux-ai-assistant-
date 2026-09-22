@@ -64,6 +64,9 @@ timeout 90 "$PY" tests/test_remote_bridge.py || status=1
 echo "== phone app in a real browser =="
 timeout 180 "$PY" tests/browser_phone_app.py || status=1
 
+echo "== hyprland animation checks =="
+"$PY" tests/test_hypr_animations.py || status=1
+
 echo "== fast path checks =="
 "$PY" tests/test_fast_path.py || status=1
 

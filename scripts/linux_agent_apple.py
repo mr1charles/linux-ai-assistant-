@@ -57,6 +57,8 @@ import chibi
 import fast_path
 import fingerprint
 import hypr_events
+import hypr_keybind
+import hypr_animations
 import model_picker
 import remote_bridge
 import toby_anim
@@ -1497,8 +1499,11 @@ class DynamicIsland(Gtk.Window):
         inner.set_border_width(10)
         box.add(inner)
 
+        self._progress_total = 0
+        self._progress_target = 0.0
+        self._progress_shown = 0.0
         self.dot = Gtk.DrawingArea()
-        self.dot.set_size_request(10, 10)
+        self.dot.set_size_request(16, 16)
         self.dot.connect("draw", self._draw_dot)
         inner.pack_start(self.dot, False, False, 0)
 
@@ -1579,14 +1584,45 @@ class DynamicIsland(Gtk.Window):
 
     def _draw_dot(self, widget, cr):
         w, h = widget.get_allocated_width(), widget.get_allocated_height()
+        cx, cy = w / 2, h / 2
+        r = min(w, h) / 2
         pulse = 0.6 + 0.4 * math.sin((time.monotonic() - self._pulse_t0) * 4.0)
-        cr.set_source_rgba(0.45, 0.75, 1.0, pulse)
-        cr.arc(w / 2, h / 2, min(w, h) / 2, 0, 2 * math.pi)
+        if self._progress_total:
+            # a ring that fills as steps finish, with the pulsing dot inside
+            fraction = self._progress_shown
+            cr.set_line_width(2.2)
+            cr.set_source_rgba(1, 1, 1, 0.14)
+            cr.arc(cx, cy, r - 1.2, 0, 2 * math.pi)
+            cr.stroke()
+            if fraction > 0:
+                cr.set_source_rgb(*ACCENT_RGB)
+                cr.arc(cx, cy, r - 1.2, -math.pi / 2, -math.pi / 2 + 2 * math.pi * fraction)
+                cr.stroke()
+            cr.set_source_rgba(*ACCENT_RGB, pulse)
+            cr.arc(cx, cy, r * 0.38, 0, 2 * math.pi)
+            cr.fill()
+            return False
+        cr.set_source_rgba(*ACCENT_RGB, pulse)
+        cr.arc(cx, cy, r * 0.62, 0, 2 * math.pi)
         cr.fill()
         return False
 
+    def set_progress(self, done, total, current_label=""):
+        """Show "2 of 4 · Click" and fill the ring. total 0 clears it."""
+        self._progress_total = total
+        self._progress_target = (done / total) if total else 0.0
+        if total:
+            text = f"{min(done + 1, total)} of {total}"
+            if current_label:
+                text += f"  ·  {current_label}"
+            elif done >= total:
+                text = "Done"
+            self.set_status(text)
+
     def _pulse_tick(self):
         if self.get_visible():
+            # ease the ring toward its target rather than jumping a step at a time
+            self._progress_shown += (self._progress_target - self._progress_shown) * 0.25
             self.dot.queue_draw()
         return True
 
@@ -3817,6 +3853,45 @@ class AssistantWindow(Gtk.Window):
             self.apply_accent_color(saved_accent)
         # last, so everything it reports on already exists
         self._start_remote_bridge()
+        threading.Thread(target=self._desktop_setup, daemon=True).start()
+        if SETTINGS.get("startup_greeting", True):
+            GLib.timeout_add(900, self._startup_greeting)
+
+    def _desktop_setup(self):
+        """Runtime-only Hyprland additions: the summon key and, if you turned
+        them on, Toby's window animations. Nothing is written to your config;
+        a Hyprland reload removes both, and they're re-added next start."""
+        combo = SETTINGS.get("summon_keybind", "SUPER, G")
+        if combo:
+            status = hypr_keybind.ensure(combo)
+            if status.startswith("taken"):
+                print(f"KEYBIND: {combo} is already {status}; summon Toby with `toby` instead", flush=True)
+        anim = toby_anim.animation_settings(SETTINGS)
+        if anim["hypr_animations_enabled"]:
+            hypr_animations.apply(anim["hypr_animation_speed"])
+
+    def _startup_greeting(self):
+        """Pop up briefly at login, say hello, and tuck away again.
+
+        Once per login: a marker in the runtime directory (cleared when you
+        log out) stops a restart from greeting you again.
+        """
+        if self.get_visible():
+            return False
+        marker = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "little-toby-greeted"
+        if marker.exists():
+            return False
+        try:
+            marker.touch()
+        except OSError:
+            pass
+        self.show_panel()
+        self.answer.set_text("Hi, I'm here. Press Super+G whenever you need me.")
+        self.answer.set_visible(True)
+        self.answer.show()
+        GLib.timeout_add(3200, lambda: (self.hide_panel() if not self._busy
+                                        and not self.entry.get_text() else None) and False)
+        return False
 
     def _on_desktop_event(self, name, data):
         direction = 0.0
@@ -3935,6 +4010,7 @@ class AssistantWindow(Gtk.Window):
         if self.island_expanded.get_visible():
             self.island_expanded.set_task(self.task_label_text, self.task_steps)
         self._sync_chibi_steps()
+        self._update_island_progress()
         self._publish_remote_state()
 
     # -- animation driver --------------------------------------------------
@@ -5015,6 +5091,19 @@ class AssistantWindow(Gtk.Window):
         return False
 
     # -- the chibi doing the task ----------------------------------------------
+    def _update_island_progress(self):
+        """While a multi-step task runs, the island shows where it's up to —
+        including when the panel is closed or the task came from the phone."""
+        steps = [st for st in self.task_steps if st[0] != "Thinking"]
+        if not steps or not self._busy:
+            self.island.set_progress(0, 0)
+            return
+        done = sum(1 for _l, status in steps if status == "done")
+        current = next((label for label, status in steps if status == "current"), "")
+        self.island.set_progress(done, len(steps), current)
+        if not self.get_visible() and not self.island.showing_card():
+            self.island.show_island(self.island.label.get_text())
+
     def _chibi_enabled(self):
         return toby_anim.animation_settings(SETTINGS)["chibi_enabled"]
 

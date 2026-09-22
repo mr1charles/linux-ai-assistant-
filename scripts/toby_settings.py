@@ -38,6 +38,7 @@ DEFAULTS = {
                                         # run instantly without waiting on the model
 
     # -- the chibi and the look ----------------------------------------------
+    "summon_keybind": "SUPER, G",      # bound at runtime if the key is free; "" to skip
     "startup_greeting": True,          # Toby pops up briefly when you log in, then tucks away
     "animations": {},                  # overrides for toby_anim.ANIMATION_DEFAULTS — see README
 

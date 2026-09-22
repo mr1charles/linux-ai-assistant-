@@ -47,6 +47,7 @@ for _domain in ("Gtk", "Gdk", "GLib", "GLib-GObject", "Pango", "cairo"):
     )
 
 import linux_agent_apple as app
+app.SETTINGS["startup_greeting"] = False
 import toby_settings
 import knowledge
 
@@ -311,6 +312,29 @@ if win is not None:
         win._finish_hide(win._panel_generation)
     except Exception:
         errors.append("face animations: " + traceback.format_exc())
+
+# -- the island shows task progress -----------------------------------------
+if win is not None:
+    try:
+        win._busy = True
+        win.task_steps = [("Thinking", "done"), ("Open YouTube", "done"),
+                          ("Click", "current"), ("Type \"x\"", "pending")]
+        win._update_island_progress()
+        text = win.island.label.get_text()
+        if not text.startswith("2 of 3") or "Click" not in text:
+            errors.append(f"the island doesn't show task progress: {text!r}")
+        if abs(win.island._progress_target - 1 / 3) > 1e-6:
+            errors.append("the island's progress ring isn't at one third")
+        import cairo as _c
+        surf = _c.ImageSurface(_c.FORMAT_ARGB32, 16, 16)
+        win.island._progress_shown = 0.33
+        win.island._draw_dot(win.island.dot, _c.Context(surf))
+        win._busy = False
+        win._update_island_progress()
+        if win.island._progress_total:
+            errors.append("the island kept showing progress after the task ended")
+    except Exception:
+        errors.append("island progress: " + traceback.format_exc())
 
 # -- the Dynamic Island's notification card --------------------------------
 if win is not None:
