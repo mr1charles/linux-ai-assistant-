@@ -47,6 +47,7 @@ for _domain in ("Gtk", "Gdk", "GLib", "GLib-GObject", "Pango", "cairo"):
     )
 
 import linux_agent_apple as app
+app.SETTINGS["startup_greeting"] = False
 import toby_settings
 import knowledge
 
@@ -214,56 +215,302 @@ if win is not None:
         app.screen_control.deny()
 
 # -- the Yes/No row is shared, and must never strand a waiting thread ------
+def _pump_until(until, seconds=3.0):
+    import time as _t
+    end = _t.monotonic() + seconds
+    ctx = GLib.MainContext.default()
+    while _t.monotonic() < end:
+        while ctx.iteration(False):
+            pass
+        if until():
+            return True
+        _t.sleep(0.01)
+    return False
+
+
 if win is not None:
+    import threading as _threading
     try:
         app.screen_control.deny()
+        win._pinch_cursor_armed = False
 
-        # An action that needs consent blocks a background thread on this
-        # event until the row is answered.
-        win._action_confirm_pending = True
-        win._confirm_event.clear()
+        # An action that needs consent blocks a background thread until the
+        # row (or a phone) answers it.
+        answer = {}
+        waiter = _threading.Thread(target=lambda: answer.setdefault("v", win._await_confirmation()))
+        waiter.start()
+        if not _pump_until(lambda: win.confirm_row.get_visible()):
+            errors.append("an action that needs permission never asked")
+        if "mouse and keyboard" not in win.confirm_label.get_text():
+            errors.append(f"the row asks the wrong thing: {win.confirm_label.get_text()!r}")
 
-        # Meanwhile the user flips the hand-pointing switch. It must not take
-        # the question over, because the blocked thread is waiting on it.
+        # Meanwhile the user flips the hand-pointing switch. Its question
+        # waits its turn; it doesn't replace the one the thread is blocked on.
         win._arm_pinch_cursor()
-        if win._pending_confirm_purpose == "pinch_cursor":
+        _pump_until(lambda: len(win.approvals.pending()) == 2)
+        if "mouse and keyboard" not in win.confirm_label.get_text():
             errors.append("hand pointing hijacked a confirmation an action was waiting on")
 
         win.on_confirm_yes()
-        if not win._confirm_event.is_set():
+        waiter.join(3)
+        if waiter.is_alive():
             errors.append("answering the confirmation left the waiting thread blocked")
-        if win._confirm_result is not True:
+        if answer.get("v") is not True or not app.screen_control.enabled:
             errors.append("answering yes did not record a yes")
 
-        # And with nothing waiting, the same row does ask for hand pointing.
+        # then the hand-pointing question comes up, and a no leaves it off
         app.screen_control.deny()
-        win._action_confirm_pending = False
-        win._pinch_cursor_armed = False
-        win._arm_pinch_cursor()
-        if win._pending_confirm_purpose != "pinch_cursor":
-            errors.append("hand pointing did not ask for mouse permission")
+        if not _pump_until(lambda: "hand" in win.confirm_label.get_text()):
+            errors.append("hand pointing's question never came up after the first was answered")
         if win._pinch_cursor_armed:
             errors.append("hand pointing armed itself before permission was given")
-
         win.on_confirm_no()
+        _pump_until(lambda: not win.confirm_row.get_visible())
         if win._pinch_cursor_armed:
             errors.append("hand pointing armed itself after permission was refused")
         if win.settings_pinch_cursor_switch.get_active():
             errors.append("refusing permission left the hand-pointing switch on")
+        if win.confirm_row.get_visible():
+            errors.append("the row stayed up with nothing left to answer")
 
         # saying yes to that same question does arm it
-        win._pinch_cursor_armed = False
         win._arm_pinch_cursor()
+        _pump_until(lambda: win.confirm_row.get_visible())
         win.on_confirm_yes()
-        if not win._pinch_cursor_armed:
+        if not _pump_until(lambda: win._pinch_cursor_armed):
             errors.append("granting permission did not arm hand pointing")
         win._disarm_pinch_cursor()
+
+        # a cancelled task's question counts as no, and the row goes away
+        app.screen_control.deny()
+        win.task_cancelled = False
+        answer.clear()
+        waiter = _threading.Thread(target=lambda: answer.setdefault("v", win._await_confirmation()))
+        waiter.start()
+        _pump_until(lambda: win.confirm_row.get_visible())
+        win.task_cancelled = True
+        waiter.join(3)
+        _pump_until(lambda: not win.confirm_row.get_visible())
+        if answer.get("v") is not False:
+            errors.append("cancelling the task didn't answer its question with no")
+        if win.confirm_row.get_visible():
+            errors.append("a cancelled question stayed on screen")
+        win.task_cancelled = False
     except Exception:
         errors.append("shared confirmation row: " + traceback.format_exc())
     finally:
         app.screen_control.deny()
-        win._action_confirm_pending = False
-        win._pending_confirm_purpose = None
+
+# -- the face: tap squash, desktop glances, thinking motes, fade out --------
+if win is not None:
+    try:
+        import cairo as _cairo
+        surf = _cairo.ImageSurface(_cairo.FORMAT_ARGB32, 56, 56)
+        win.face.set_state(app.State.IDLE)
+        win.face.tap()
+        win.face.react("workspace", 1.0)
+        win.face.react("openwindow")
+        for _ in range(5):
+            win.face.tick("neutral")
+            win.face.on_draw(win.face, _cairo.Context(surf))
+        if abs(win.face.squash.value) < 1e-6 and abs(win.face.squash.velocity) < 1e-6:
+            errors.append("tapping the face produced no squash")
+        win.face.set_state(app.State.THINKING)
+        win.face.state_since -= 1.0
+        win.face.tick("neutral")
+        win.face.on_draw(win.face, _cairo.Context(surf))
+
+        # reactions are suppressed while Toby is busy
+        before = win.face.glance.velocity
+        win.face.react("workspace", 1.0)
+        if win.face.glance.velocity != before:
+            errors.append("the face glanced at the desktop while it was thinking")
+
+        # idle intensity 0 means perfectly still
+        app.SETTINGS["animations"] = {"idle_intensity": 0.0}
+        win.face.reload_animation_settings()
+        win.face.set_state(app.State.IDLE)
+        win.face.tick("neutral")
+        if win.face.bob != 0.0 or win.face.sway != 0.0:
+            errors.append("idle intensity 0 still left the face bobbing")
+        app.SETTINGS["animations"] = {}
+        win.face.reload_animation_settings()
+
+        # hiding fades rather than vanishing, and toggling mid-fade reopens it
+        win.show_panel()
+        win.hide_panel()
+        if not win._hiding:
+            errors.append("hiding the panel didn't fade out")
+        win.toggle()
+        if win._hiding:
+            errors.append("toggling during a fade-out didn't bring the panel back")
+        win._finish_hide(win._panel_generation)
+
+        # With no frames arriving at all (a locked screen), the fade must
+        # still finish on the clock. Nothing here pumps the frame clock, so
+        # only the fallback timer can complete it.
+        win.show_panel()
+        real_tick = win.outer.add_tick_callback
+        win.outer.add_tick_callback = lambda *_a: 0   # the compositor sends no frames
+        win.hide_panel()
+        ctx = GLib.MainContext.default()
+        import time as _t
+        end = _t.monotonic() + 1.2
+        while _t.monotonic() < end and win._hiding:
+            ctx.iteration(False)
+            _t.sleep(0.01)
+        if win._hiding or win.get_visible():
+            errors.append("a fade-out with no frames never finished; the pill was left up")
+        win.outer.add_tick_callback = real_tick
+    except Exception:
+        errors.append("face animations: " + traceback.format_exc())
+
+# -- the shared motion engine, driving real windows ---------------------------
+if win is not None:
+    import time as _t
+
+    def pump(seconds, until=None):
+        ctx = GLib.MainContext.default()
+        end = _t.monotonic() + seconds
+        while _t.monotonic() < end:
+            ctx.iteration(False)
+            if until and until():
+                return True
+            _t.sleep(0.005)
+        return False
+
+    try:
+        stub = _layer_shell_stub
+        margins = []
+        real_set_margin = app.GtkLayerShell.set_margin
+
+        def logging_set_margin(window, edge, value):
+            if window is win.island:
+                margins.append(value)
+            real_set_margin(window, edge, value)
+
+        app.GtkLayerShell.set_margin = logging_set_margin
+
+        # the island arrives and settles exactly in place
+        win.island.hide_island()
+        pump(0.6)
+        margins.clear()
+        win.island.show_island("hello")
+        pump(0.6)
+        if not margins or margins[-1] != 14:
+            errors.append(f"the island didn't settle at its resting place: {margins[-3:]}")
+        if abs(win.island._surface.get_opacity() - 1.0) > 1e-3:
+            errors.append("the island didn't finish fading in")
+
+        # hidden halfway, then shown again: it turns around, never jumps
+        margins.clear()
+        win.island.hide_island()
+        pump(0.08)
+        win.island.show_island("again")
+        pump(0.6)
+        biggest = max(abs(b - a) for a, b in zip(margins, margins[1:])) if len(margins) > 1 else 0
+        if biggest > 20:
+            errors.append(f"the island jumped {biggest}px when reversed mid-hide")
+        if not win.island.get_visible():
+            errors.append("the island was hidden after being shown again mid-hide")
+        app.GtkLayerShell.set_margin = real_set_margin
+
+        # leaving really hides it, on the clock
+        win.island.hide_island()
+        if not pump(1.0, until=lambda: not win.island.get_visible()):
+            errors.append("the island never finished leaving")
+
+        # the sidebar opens and closes with the same engine
+        win.toggle_expanded()
+        pump(0.8)
+        if abs(win.sidebar_surface.get_opacity() - 1.0) > 1e-3:
+            errors.append("the sidebar didn't finish fading in")
+        win.toggle_expanded()
+        if not pump(1.0, until=lambda: not win.sidebar_window.get_visible()):
+            errors.append("the sidebar never finished closing")
+
+        # reduced motion: everything lands instantly, and still completes
+        app.SETTINGS["animations"] = {"reduce_motion": True}
+        win.island.show_island("calm")
+        if abs(win.island._surface.get_opacity() - 1.0) > 1e-3:
+            errors.append("with reduced motion the island still animated in")
+        win.island.hide_island()
+        if win.island.get_visible():
+            errors.append("with reduced motion the island didn't hide at once")
+        app.SETTINGS["animations"] = {}
+
+        # "Thinking" breathes while waiting, and settles when words arrive
+        win._waiting_for_first_chunk = True
+        win._start_thinking_dots()
+        pump(0.5)
+        if win.answer.get_text() != "Thinking":
+            errors.append(f"the waiting text is {win.answer.get_text()!r}")
+        if win.answer.get_opacity() > 0.95:
+            errors.append("\"Thinking\" isn't breathing")
+        win._waiting_for_first_chunk = False
+        pump(2.0)
+        if abs(win.answer.get_opacity() - 1.0) > 1e-3:
+            errors.append("the answer line stayed dimmed after waiting ended")
+
+        # fullscreen holds the reply card until it's over
+        win.set_visible(False)
+        win._on_desktop_event("fullscreen", "1")
+        win._show_reply_card("q", "a reply")
+        if win.island.showing_card():
+            errors.append("a reply card appeared over a fullscreen window")
+        win._on_desktop_event("fullscreen", "0")
+        if not pump(2.0, until=win.island.showing_card):
+            errors.append("the held reply card never appeared after fullscreen ended")
+        win.island.hide_island()
+        pump(0.6)
+    except Exception:
+        errors.append("motion engine in the app: " + traceback.format_exc())
+
+# -- animation settings save and take effect ---------------------------------
+if win is not None:
+    try:
+        win.animation_switches["idle_enabled"].set_active(False)
+        win.animation_sliders["fold_close_duration"].set_value(0.9)
+        win.animation_sliders["interaction_intensity"].set_value(0.0)
+        win.on_settings_save_clicked()
+        saved = app.toby_settings.load()["animations"]
+        if saved.get("idle_enabled") is not False or abs(saved.get("fold_close_duration", 0) - 0.9) > 1e-6:
+            errors.append(f"animation settings didn't save: {saved}")
+        if win.face.anim["idle_enabled"]:
+            errors.append("turning idle life off didn't reach the face")
+        before = win.face.squash.velocity
+        win.face.tap()
+        if win.face.squash.velocity != before:
+            errors.append("tap reaction still happens at intensity 0")
+        win._reset_animation_controls()
+        win.on_settings_save_clicked()
+        if not win.face.anim["idle_enabled"]:
+            errors.append("resetting to defaults didn't turn idle life back on")
+    except Exception:
+        errors.append("animation settings: " + traceback.format_exc())
+
+# -- the island shows task progress -----------------------------------------
+if win is not None:
+    try:
+        win._busy = True
+        win.task_steps = [("Thinking", "done"), ("Open YouTube", "done"),
+                          ("Click", "current"), ("Type \"x\"", "pending")]
+        win._update_island_progress()
+        text = win.island.label.get_text()
+        if not text.startswith("2 of 3") or "Click" not in text:
+            errors.append(f"the island doesn't show task progress: {text!r}")
+        if abs(win.island._progress_target - 1 / 3) > 1e-6:
+            errors.append("the island's progress ring isn't at one third")
+        import cairo as _c
+        surf = _c.ImageSurface(_c.FORMAT_ARGB32, 16, 16)
+        win.island._progress_shown = 0.33
+        win.island._draw_dot(win.island.dot, _c.Context(surf))
+        win._busy = False
+        win._update_island_progress()
+        if win.island._progress_total:
+            errors.append("the island kept showing progress after the task ended")
+    except Exception:
+        errors.append("island progress: " + traceback.format_exc())
 
 # -- the Dynamic Island's notification card --------------------------------
 if win is not None:

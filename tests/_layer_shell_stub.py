@@ -15,7 +15,16 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def install():
-    """Stub GtkLayerShell, put scripts/ on the path, and return the repo root."""
+    """Stub GtkLayerShell, put scripts/ on the path, and return the repo root.
+
+    Also points HOME at a fresh scratch folder, so a test run never reads or
+    writes your real ~/linux-agent: settings, history, task history and
+    paired phones all start empty and are thrown away afterwards.
+    """
+    import tempfile
+    scratch = tempfile.mkdtemp(prefix="toby-test-home-")
+    os.makedirs(os.path.join(scratch, "linux-agent"), exist_ok=True)
+    os.environ["HOME"] = scratch
     import gi
 
     real_require_version = gi.require_version
@@ -56,6 +65,7 @@ def install():
     stub.get_margin = lambda window, edge: margins.get((id(window), edge), 0)
     stub.set_keyboard_mode = lambda window, mode: None
     stub.set_exclusive_zone = lambda window, zone: None
+    stub.set_monitor = lambda window, monitor: None
 
     import gi.repository
 

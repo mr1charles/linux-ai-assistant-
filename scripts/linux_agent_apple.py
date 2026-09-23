@@ -9,14 +9,14 @@ and study notes, can (with explicit per-session confirmation) control the
 mouse/keyboard and install packages, and can shift into Study Mode on a
 schedule or automatically when it recognizes schoolwork on screen.
 
-Setup: see README.md in the project root.
+Setup: ./install.sh, then `toby doctor`. See README.md.
 
-Hyprland keybind (Super+G to summon):
+Toby binds Super+G in the running Hyprland itself at startup (only if the
+key is free, and never in your config). To bind it yourself instead:
   bind = SUPER, G, exec, pkill -SIGUSR1 -f linux_agent_apple.py
-  exec-once = bash -c 'set -a; source ~/linux-agent/.env; set +a; python3 ~/linux-agent/scripts/linux_agent_apple.py'
 
-For real background blur behind the panel (glassmorphism), Hyprland can blur
-by namespace — add to hyprland.conf:
+Optional glass blur behind Toby's surfaces, if you'd like it — add to your
+Hyprland config:
   layerrule = blur, apple-agent
   layerrule = ignorezero, apple-agent
 """
@@ -30,6 +30,7 @@ import subprocess
 import threading
 import time
 import datetime
+import urllib.parse
 from datetime import datetime as dt
 from enum import Enum, auto
 from pathlib import Path
@@ -39,7 +40,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
-from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell  # noqa: E402
 
 import cairo  # noqa: E402
 import requests  # noqa: E402
@@ -53,12 +55,31 @@ import school_mode
 import toby_settings
 import voice_engine
 import camera_engine
+import chibi
+import fast_path
+import fingerprint
+import hypr_events
+import hypr_keybind
+import hypr_animations
+import model_picker
+import remote_bridge
+import toby_anim
+import approvals
+import computer_tools
+import jobs
+import notify
+import permissions
+import screen_view
+import tasks
+import work_mode
 
 SETTINGS = toby_settings.load()
 
 REPO_DIR = Path.home() / "linux-agent"
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/chat")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+# Blank means "pick the best installed model at startup" (model_picker.py).
+OLLAMA_MODEL_ENV = os.environ.get("OLLAMA_MODEL", "").strip()
+OLLAMA_MODEL = OLLAMA_MODEL_ENV or model_picker.FALLBACK
 DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 EMAIL_ADDRESS = os.environ.get("EMAIL_ADDRESS")
 EMAIL_APP_PASSWORD = os.environ.get("EMAIL_APP_PASSWORD")
@@ -119,6 +140,29 @@ inside actions, even for a single action. Each is one of:
   {{"tool": "enable_study_mode"}}
   {{"tool": "disable_study_mode"}}
   {{"tool": "set_school_schedule", "day": "monday", "start": "07:30", "end": "19:00"}}
+  {{"tool": "system_status"}}
+  {{"tool": "list_windows"}}
+  {{"tool": "focus_window", "match": "firefox"}}
+  {{"tool": "list_programs", "match": "steam"}}
+  {{"tool": "stop_program", "match": "steam"}}
+  {{"tool": "list_files", "path": "~/Downloads"}}
+  {{"tool": "search_files", "query": "invoice", "path": "~"}}
+  {{"tool": "read_file", "path": "~/project/README.md"}}
+  {{"tool": "write_file", "path": "~/notes/todo.txt", "content": "...", "append": false}}
+  {{"tool": "move_file", "from": "~/Downloads/a.pdf", "to": "~/Documents/"}}
+  {{"tool": "trash_files", "paths": ["~/Downloads/old.zip"]}}
+  {{"tool": "open_path", "path": "~/Documents/report.pdf"}}
+  {{"tool": "open_terminal", "cwd": "~/project", "command": "claude"}}
+  {{"tool": "run_command", "command": "npm test", "cwd": "~/project", "background": false}}
+  {{"tool": "job_status", "job": "latest"}}
+  {{"tool": "watch_job", "job": "latest", "on_fail": "notify"}}
+  {{"tool": "download_file", "url": "https://...", "to": "~/Downloads"}}
+  {{"tool": "look_at_screen"}}
+  {{"tool": "click_on", "target": "#12", "button": "left", "double": false}}
+  {{"tool": "drag", "from": "#4", "to": "#9"}}
+  {{"tool": "scroll", "amount": 3, "target": "#7"}}
+  {{"tool": "draw", "shape": "circle", "target": "42.50"}}
+  {{"tool": "write_by_hand", "text": "Check this", "target": "#15", "where": "below", "size": 22}}
 
 "reply" is shown to the user. "mood" reflects how the reply should feel — pick whichever fits.
 
@@ -131,7 +175,35 @@ Rules:
   send_discord_message, close_active_window, close_tab, read_emails, move_mouse,
   click_mouse, type_text, key_press, disable_control, read_screen, install_package,
   show_knowledge_tree, show_knowledge_bubbles, add_study_note, enable_study_mode,
-  disable_study_mode, set_school_schedule.
+  disable_study_mode, set_school_schedule, system_status, list_windows, focus_window,
+  list_programs, stop_program, list_files, search_files, read_file, write_file,
+  move_file, trash_files, open_path, open_terminal, run_command, job_status,
+  watch_job, download_file, look_at_screen, click_on, drag, scroll, draw, write_by_hand.
+- Work Mode tools, for working on what's on screen like a person with a pen, mouse and
+  keyboard: call look_at_screen first; it returns numbered text elements (#id) with
+  positions. Then point at things by "#id", by their exact words or number ("Submit",
+  "42.50"), or with "x"/"y" fractions. draw shapes: circle, underline, strike, highlight,
+  box, check, cross, or arrow (with "to"). write_by_hand "where": below, right, above, at.
+  After acting you get the result; look_at_screen again before the next visual step.
+  Use Work Mode tools only for visual work (marking up a document, a canvas, a UI with no
+  other way in); for opening things, files and commands, the other tools are faster.
+- write_by_hand writes exactly what the user asked you to write. Never compose answers to
+  homework, worksheet, quiz or test questions and write them in; offer to explain instead.
+- Computer tools: paths start with ~ (the user's home). Looking tools (system_status,
+  list_windows, list_programs, list_files, search_files, read_file, job_status)
+  return what they found; you'll then get a second turn with the results to answer
+  from — so on the first turn, just call them with a short reply like "Checking."
+  Never guess a status, a file's contents or whether something is running: look.
+- "Is X still running?" -> list_programs with match X. "How's the build going?" ->
+  job_status. "Delete" means trash_files (it goes to the trash). Rename = move_file.
+- run_command runs in a shell in cwd. Use "background": true for anything long
+  (builds, servers, installs, downloads) and then tell the user you'll keep an eye
+  on it; add watch_job with "on_fail": "retry" if they ask to try again if it fails.
+- To "continue" earlier work, use the Recent tasks listed in the context below.
+  To work on a coding project interactively, open_terminal in the project folder
+  with the tool the user names (e.g. "claude" for Claude Code).
+- Changing, deleting, running and downloading all ask the user first; Toby shows
+  them what you're about to do. Never claim something happened until it has.
 - x and y for move_mouse are fractions of the screen from 0.0 to 1.0, never raw pixels.
 - read_screen: ONLY call this when the user's message explicitly references
   something currently visible on their screen — "read this", "what does this
@@ -350,6 +422,12 @@ def install_package(package_name):
 
 screen_control = ScreenControl()
 
+# Commands Toby runs (builds, tests, downloads) and what it has been asked to
+# do; both outlive a single request so the phone can ask about them later.
+JOBS = jobs.JobManager()
+TASKS = tasks.TaskLog()
+SCREEN = screen_view.ScreenViewer()
+
 
 # ---------------------------------------------------------------------------
 # Pointer driver — used by Camera Mode's pinch-to-point
@@ -490,7 +568,113 @@ DISPATCH = {
     "enable_study_mode": lambda a: study_mode_state.enable(),
     "disable_study_mode": lambda a: study_mode_state.disable(),
     "set_school_schedule": lambda a: school_mode.set_day_schedule(a["day"], a["start"], a["end"]),
+    "system_status": lambda a: computer_tools.describe_status(),
+    "list_windows": lambda a: computer_tools.describe_windows(),
+    "focus_window": lambda a: computer_tools.focus_window(str(a.get("match", ""))),
+    "list_programs": lambda a: computer_tools.describe_programs(str(a.get("match", ""))),
+    "stop_program": lambda a: computer_tools.stop_program(str(a.get("match", ""))),
+    "list_files": lambda a: computer_tools.list_files(a.get("path", "~")),
+    "search_files": lambda a: computer_tools.search_files(a.get("query", ""), a.get("path", "~")),
+    "read_file": lambda a: computer_tools.read_file(a.get("path", "")),
+    "write_file": lambda a: computer_tools.write_file(a.get("path", ""), a.get("content", ""),
+                                                      bool(a.get("append"))),
+    "move_file": lambda a: computer_tools.move_file(a.get("from", ""), a.get("to", "")),
+    "trash_files": lambda a: computer_tools.trash_files(a.get("paths") or [a.get("path", "")]),
+    "open_path": lambda a: computer_tools.open_path(a.get("path", "")),
+    "open_terminal": lambda a: computer_tools.open_terminal(a.get("cwd", "~"), str(a.get("command", ""))),
+    # run_command, download_file, job_status and watch_job need the running
+    # task and the job list, so the window adds them (see _install_job_tools)
 }
+
+# Tools whose results the model needs to see before it can answer: after they
+# run, Toby gets another turn with what they returned.
+FOLLOW_UP_TOOLS = {"system_status", "list_windows", "list_programs", "list_files", "search_files",
+                   "read_file", "run_command", "job_status",
+                   "look_at_screen", "click_on", "drag", "scroll", "draw", "write_by_hand"}
+MAX_TOOL_ROUNDS = 4
+MAX_WORK_MODE_ROUNDS = 10   # look, act, look again: visual work takes more turns
+WORK_TOOLS = {"look_at_screen", "click_on", "drag", "scroll", "draw", "write_by_hand"}
+
+
+def describe_action(action):
+    """A short, plain label for one step — what the checklist shows.
+
+    The model's tool names ("open_url", "key_press") mean nothing to anyone
+    reading over Toby's shoulder; "Open youtube.com" does.
+    """
+    tool = action.get("tool", "")
+    def short(text, n=34):
+        text = str(text or "").strip()
+        return text if len(text) <= n else text[: n - 1] + "…"
+
+    if tool == "open_url":
+        url = str(action.get("url", "")).replace("https://", "").replace("http://", "")
+        return f"Open {short(url.rstrip('/'))}"
+    if tool == "open_app":
+        return f"Open {short(action.get('command', 'an app'))}"
+    if tool == "type_text":
+        return f'Type "{short(action.get("text", ""), 26)}"'
+    if tool == "key_press":
+        return f"Press {short(action.get('keys', '')).upper()}"
+    if tool == "click_mouse":
+        button = action.get("button", "left")
+        return "Click" if button == "left" else f"{button.capitalize()}-click"
+    if tool == "move_mouse":
+        return "Move the pointer"
+    labels = {
+        "send_discord_message": "Send the Discord message",
+        "close_active_window": "Close this window",
+        "close_tab": "Close this tab",
+        "read_emails": "Check your email",
+        "read_screen": "Read your screen",
+        "install_package": f"Install {short(action.get('package', 'a package'))}",
+        "show_knowledge_tree": "Show what I know about you",
+        "show_knowledge_bubbles": "Show what I know about you",
+        "add_study_note": f"Save a {short(action.get('subject', 'study'), 16)} note",
+        "enable_study_mode": "Turn on Study Mode",
+        "disable_study_mode": "Turn off Study Mode",
+        "set_school_schedule": f"Set {short(action.get('day', ''), 12).capitalize()}'s schedule",
+        "disable_control": "Hand back the mouse and keyboard",
+        "system_status": "Check the computer",
+        "list_windows": "See what's open",
+        "focus_window": f"Switch to {short(action.get('match', 'a window'), 24)}",
+        "list_programs": (f"Check whether {short(action.get('match'), 24)} is running"
+                          if action.get("match") else "See what's running"),
+        "stop_program": f"Stop {short(action.get('match', 'a program'), 24)}",
+        "list_files": f"Look in {short(action.get('path', '~'), 28)}",
+        "search_files": f"Search for \"{short(action.get('query', ''), 22)}\"",
+        "read_file": f"Read {short(os.path.basename(str(action.get('path', ''))) or 'a file', 28)}",
+        "write_file": f"Write {short(os.path.basename(str(action.get('path', ''))) or 'a file', 28)}",
+        "move_file": f"Move {short(os.path.basename(str(action.get('from', ''))) or 'a file', 26)}",
+        "trash_files": (f"Delete {len(action.get('paths') or [1])} "
+                        f"file{'s' if len(action.get('paths') or [1]) != 1 else ''}"),
+        "open_path": f"Open {short(os.path.basename(str(action.get('path', '')).rstrip('/')) or 'it', 28)}",
+        "open_terminal": (f"Open a terminal for {short(action.get('command'), 20)}"
+                          if action.get("command") else "Open a terminal"),
+        "run_command": f"Run {short(action.get('command', ''), 28)}",
+        "job_status": "Check on the job",
+        "watch_job": "Keep an eye on the job",
+        "download_file": "Download " + short(os.path.basename(urllib.parse.urlparse(
+            str(action.get("url", ""))).path) or "the file", 26),
+        "look_at_screen": "Look at the screen",
+        "click_on": f"Click {short(action.get('target', 'there'), 24)}",
+        "drag": f"Drag {short(action.get('from', 'it'), 14)} to {short(action.get('to', 'there'), 14)}",
+        "scroll": "Scroll " + ("up" if int(action.get("amount", 3) or 3) < 0 else "down"),
+        "draw": f"{str(action.get('shape', 'circle')).capitalize()} {short(action.get('target', 'it'), 22)}",
+        "write_by_hand": f'Write "{short(action.get("text", ""), 22)}"',
+    }
+    return labels.get(tool, tool.replace("_", " ").capitalize() or "Step")
+
+
+# Tools where Toby visibly acts on the screen. For these the chibi comes out
+# and does the work in view; for purely informational ones (checking email,
+# saving a note) there's nothing on screen to walk to.
+PHYSICAL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press", "open_url",
+                  "open_app", "close_tab", "close_active_window", "send_discord_message",
+                  "open_terminal", "open_path", "focus_window"}
+# The ones that go through screen_control's consent gate.
+CONTROL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press",
+                 "click_on", "drag", "scroll", "draw", "write_by_hand"}
 
 
 def load_history():
@@ -698,6 +882,18 @@ def _build_volatile_context():
     if recent_actions:
         recent_str = "; ".join(f"{a['tool']} ({a['summary']})" for a in recent_actions)
         context_lines.append(f"Actions taken earlier this session (most recent last): {recent_str}")
+    if SETTINGS.get("work_mode"):
+        context_lines.append("Work Mode is ON: for anything on screen, look_at_screen and act on "
+                             "it visually (click_on, draw, write_by_hand, drag, scroll).")
+    running = JOBS.running()
+    if running:
+        context_lines.append("Background jobs: " + "; ".join(
+            f"job {j.id}: {j.describe()}" for j in running[:4]))
+    recent = [t for t in TASKS.recent(4) if t["state"] in ("completed", "failed", "cancelled")][:3]
+    if recent:
+        context_lines.append("Recent tasks (newest first): " + "; ".join(
+            f"\"{t['text'][:80]}\" ({t['state']}{': ' + t['reply'][:80] if t['reply'] else ''})"
+            for t in recent))
     if context_lines:
         parts.append("Ambient context (for your awareness, not something the user necessarily "
                      "mentioned):\n" + "\n".join(context_lines))
@@ -748,6 +944,14 @@ def apply_model_settings():
     study_notes.configure(OLLAMA_URL, model, OLLAMA_KEEP_ALIVE)
 
 
+def resolve_model():
+    """Settle which local model to use, from what Ollama has installed."""
+    global OLLAMA_MODEL
+    OLLAMA_MODEL = model_picker.pick(SETTINGS.get("ollama_model", ""), OLLAMA_MODEL_ENV,
+                                     model_picker.installed_models(OLLAMA_URL))
+    return OLLAMA_MODEL
+
+
 def warm_up_model():
     """Load the model into memory in the background at startup.
 
@@ -759,6 +963,8 @@ def warm_up_model():
     """
     def worker():
         try:
+            resolve_model()
+            apply_model_settings()
             requests.post(
                 OLLAMA_URL.replace("/api/chat", "/api/generate"),
                 json={"model": _active_model(), "prompt": "", "stream": False,
@@ -771,7 +977,25 @@ def warm_up_model():
     threading.Thread(target=worker, daemon=True).start()
 
 
+_last_model_check = [0.0]
+
+
+def _maybe_upgrade_model():
+    """If a better model finished downloading in the background, start
+    using it. Checked at most every two minutes, on the request thread."""
+    if SETTINGS.get("ollama_model") or OLLAMA_MODEL_ENV:
+        return
+    if time.monotonic() - _last_model_check[0] < 120:
+        return
+    _last_model_check[0] = time.monotonic()
+    before = OLLAMA_MODEL
+    if resolve_model() != before:
+        apply_model_settings()
+        print(f"MODEL: switched to {OLLAMA_MODEL} now that it's installed", flush=True)
+
+
 def think(instruction, history, on_chunk=None, cancel_check=None):
+    _maybe_upgrade_model()
     system_content = _build_system_content()
     messages = [{"role": "system", "content": system_content}]
     messages.extend(_trim_history(history))
@@ -784,6 +1008,9 @@ def think(instruction, history, on_chunk=None, cancel_check=None):
         "keep_alive": OLLAMA_KEEP_ALIVE,
         "options": OLLAMA_OPTIONS,
     }
+    if model_picker.is_hybrid_thinker(payload["model"]):
+        # these reason at length before answering unless told not to
+        payload["think"] = False
 
     # 300s, not 120s — a longer, multi-step request (or a longer context from
     # facts/notes/ambient window info) can genuinely take a while to even
@@ -795,6 +1022,14 @@ def think(instruction, history, on_chunk=None, cancel_check=None):
     try:
         if on_chunk:
             resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT, stream=True)
+            if resp.status_code == 400 and "think" in payload and "think" in resp.text.lower():
+                # an older Ollama that doesn't know the option: ask again without it
+                payload.pop("think")
+                resp = requests.post(OLLAMA_URL, json=payload, timeout=OLLAMA_TIMEOUT, stream=True)
+            if resp.status_code == 404:
+                return {"actions": [], "reply": (
+                    f"The model {payload['model']} isn't installed. Run: ollama pull {payload['model']}"
+                    " — or pick another model in Settings."), "mood": "concerned"}
             resp.raise_for_status()
             raw = ""
             for line in resp.iter_lines():
@@ -913,23 +1148,73 @@ def think_cloud(instruction, history, on_chunk=None, cancel_check=None):
     return _parse_llm_json_reply(raw)
 
 # ---------------------------------------------------------------------------
-# Animation helpers
+# Motion — every transition in this file runs through MOTION
+#
+# The curves, durations and the engine itself live in toby_anim.py, shared
+# with the chibi, the lid fold, the stylesheet, Hyprland and the phone app.
+# Nothing below writes its own timer loop or easing function any more: a
+# window appearing calls reveal(), leaving calls dismiss(), and anything
+# else calls MOTION.animate(). See docs/ANIMATION.md.
 # ---------------------------------------------------------------------------
 
-def ease_out_back(t):
-    c1 = 1.70158
-    c3 = c1 + 1
-    t = max(0.0, min(1.0, t))
-    return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2
+from toby_anim import ease_out_cubic, lerp  # noqa: E402  (used by the face and ring)
 
 
-def ease_out_cubic(t):
-    t = max(0.0, min(1.0, t))
-    return 1 - (1 - t) ** 3
+def _reduce_motion():
+    """The user's reduced-motion setting, or GTK's system-wide equivalent."""
+    if toby_anim.animation_settings(SETTINGS)["reduce_motion"]:
+        return True
+    settings = Gtk.Settings.get_default()
+    try:
+        return settings is not None and not settings.get_property("gtk-enable-animations")
+    except Exception:
+        return False
 
 
-def lerp(a, b, t):
-    return a + (b - a) * t
+MOTION = toby_anim.Animator(lambda tick: GLib.timeout_add(16, tick), reduce_motion=_reduce_motion)
+
+
+def _margin_setter(window, edge):
+    return lambda value: GtkLayerShell.set_margin(window, edge, int(round(value)))
+
+
+def reveal(window, surface, key, edge=None, margin_from=None, margin_to=None,
+           duration="emphasized"):
+    """Bring a window in: a fade, plus a short travel along its anchored edge.
+
+    Safe to call on a window that is already showing or halfway through
+    leaving — it simply turns around from wherever it is.
+    """
+    arriving = not window.get_visible()
+    window.set_visible(True)
+    if arriving:
+        MOTION.jump(key + "/opacity", 0.0, surface.set_opacity)
+        if edge is not None:
+            MOTION.jump(key + "/margin", margin_from, _margin_setter(window, edge))
+    MOTION.animate(key + "/opacity", 1.0, surface.set_opacity, duration, "enter")
+    if edge is not None:
+        MOTION.animate(key + "/margin", margin_to, _margin_setter(window, edge), duration, "enter")
+
+
+def dismiss(window, surface, key, edge=None, margin_to=None, on_done=None):
+    """Send a window away: fade and travel out, then actually hide it.
+
+    If reveal() is called before this finishes, the hide is abandoned — the
+    window turns around instead of vanishing mid-return.
+    """
+    if not window.get_visible():
+        if on_done:
+            on_done()
+        return
+
+    def finish():
+        window.set_visible(False)
+        if on_done:
+            on_done()
+
+    MOTION.animate(key + "/opacity", 0.0, surface.set_opacity, "standard", "exit", on_done=finish)
+    if edge is not None:
+        MOTION.animate(key + "/margin", margin_to, _margin_setter(window, edge), "standard", "exit")
 
 
 class State(Enum):
@@ -953,12 +1238,25 @@ MOOD_TO_STATE_TWEAK = {
 # ---------------------------------------------------------------------------
 
 class Face(Gtk.DrawingArea):
-    SIZE = 40
+    # The face itself is 40px across; the widget is a little larger so the
+    # thinking motes and the squash on a tap have room to move without being
+    # clipped at the edges.
+    FACE_DIAMETER = 40
+    SIZE = 56
 
     def __init__(self):
         super().__init__()
         self.set_size_request(self.SIZE, self.SIZE)
         self.connect("draw", self.on_draw)
+
+        # physical reactions: a squash when tapped, a hop when a task is done,
+        # a glance when the desktop changes — all springs, so a second tap
+        # mid-reaction continues the motion instead of restarting it
+        self.squash = toby_anim.Spring(0.0, stiffness=420, damping=16)
+        self.glance = toby_anim.Spring(0.0, stiffness=90, damping=14)
+        self.brow_react = toby_anim.Spring(0.0, stiffness=120, damping=14)
+        self._last_tick_time = time.monotonic()
+        self.anim = toby_anim.animation_settings(SETTINGS)
 
         self.t0 = time.monotonic()
         self.state = State.SLEEPING
@@ -1010,6 +1308,52 @@ class Face(Gtk.DrawingArea):
     def pulse_happy(self):
         """Brief celebratory expression — call when a task completes successfully."""
         self._happy_pulse_until = time.monotonic() + 0.7
+        if self.anim["interaction_enabled"]:
+            self.squash.kick(-5.0 * self.anim["interaction_intensity"])  # a little hop
+
+    def tap(self):
+        """A quick squash-and-recover when Toby is clicked."""
+        if self.anim["interaction_enabled"]:
+            self.squash.kick(7.0 * self.anim["interaction_intensity"])
+
+    def react(self, kind, direction=0.0):
+        """Glance at something that just happened on the desktop.
+
+        Small on purpose: a look and a raised brow, over in half a second.
+        It should be the kind of thing you only notice if you're looking.
+        """
+        if not (self.anim["desktop_reactions"] and self.state == State.IDLE):
+            return
+        strength = self.anim["idle_intensity"]
+        if kind in ("workspace", "workspacev2"):
+            self.glance.kick(direction * 9.0 * strength)
+        elif kind in ("openwindow", "urgent"):
+            self.brow_react.kick(4.0 * strength)
+            self.glance.kick(2.5 * strength)
+        elif kind == "closewindow":
+            self.glance.kick(-2.5 * strength)
+        elif kind == "fullscreen":
+            self.brow_react.kick(3.0 * strength)
+
+    def reload_animation_settings(self):
+        self.anim = toby_anim.animation_settings(SETTINGS)
+
+    def needs_full_frame_rate(self):
+        """True while anything is changing fast enough to need every frame.
+
+        Idle breathing and drifting are slow enough that a third of the
+        frames look the same; blinks, reactions, state changes, thinking,
+        listening and talking get the full rate.
+        """
+        now = time.monotonic()
+        if self.state in (State.WAKING, State.THINKING, State.LISTENING, State.SPEAKING):
+            return True
+        if now - self.state_since < 1.0 or now < self._happy_pulse_until:
+            return True
+        if now - self._last_blink_time < 0.25:
+            return True
+        return not (self.squash.at_rest(0.01) and self.glance.at_rest(0.01)
+                    and self.brow_react.at_rest(0.01))
 
     def set_audio_level(self, level):
         """0..1 mic input level, fed continuously while Voice Mode is listening —
@@ -1022,6 +1366,11 @@ class Face(Gtk.DrawingArea):
     def tick(self, mood="neutral"):
         now = time.monotonic()
         elapsed_in_state = now - self.state_since
+        dt = now - self._last_tick_time
+        self._last_tick_time = now
+        self.squash.step(dt)
+        self.glance.step(dt)
+        self.brow_react.step(dt)
 
         target_eye = 1.0
         target_mouth = 0.3
@@ -1104,17 +1453,34 @@ class Face(Gtk.DrawingArea):
         self.right_eye_reveal = lerp(self.right_eye_reveal, target_right_eye_reveal, rate)
         self.mouth_reveal = lerp(self.mouth_reveal, target_mouth_reveal, rate)
 
-        self.breath = math.sin(now * 1.6) * 1.5
-        self.bob = math.sin(now * 1.1) * 2.0 if self.state != State.SLEEPING else 0.0
-        self.sway = math.sin(now * 0.65) * 1.2 if self.state not in (State.SLEEPING, State.WAKING) else 0.0
-        self.tilt = math.sin(now * 0.5) * 0.035 if self.state == State.IDLE else lerp(self.tilt, 0.0, 0.2)
+        # idle life, scaled by the user's idle intensity (0 = perfectly still)
+        idle = self.anim["idle_intensity"] if self.anim["idle_enabled"] else 0.0
+        self.breath = math.sin(now * 1.6) * 1.5 * idle
+        self.bob = math.sin(now * 1.1) * 2.0 * idle if self.state != State.SLEEPING else 0.0
+        self.sway = (math.sin(now * 0.65) * 1.2 * idle
+                     if self.state not in (State.SLEEPING, State.WAKING) else 0.0)
+        self.tilt = (math.sin(now * 0.5) * 0.035 * idle if self.state == State.IDLE
+                     else lerp(self.tilt, 0.0, 0.2))
+        self.look_x = max(-1.2, min(1.2, self.look_x + self.glance.value * 0.08))
+        self.eyebrow += self.brow_react.value * 0.06
 
         self.queue_draw()
 
     def on_draw(self, widget, cr):
         w, h = self.get_allocated_width(), self.get_allocated_height()
         cx, cy = w / 2 + self.sway, h / 2 + self.bob
-        r = (min(w, h) / 2 - 3 + self.breath * 0.3) * max(0.06, self.face_scale)
+        r = (self.FACE_DIAMETER / 2 - 3 + self.breath * 0.3) * max(0.06, self.face_scale)
+
+        # squash and stretch about the bottom of the face, so a tap reads as
+        # something soft being pressed rather than a picture being scaled
+        sq = max(-0.22, min(0.22, self.squash.value * 0.05))
+        if abs(sq) > 0.001:
+            cr.translate(cx, cy + r)
+            cr.scale(1 + sq * 0.7, 1 - sq)
+            cr.translate(-cx, -(cy + r))
+
+        if self.state == State.THINKING and r > 4:
+            self._draw_thinking_motes(cr, cx, cy, r)
 
         # soft contact shadow beneath the face for a touch of depth
         if r > 1:
@@ -1181,6 +1547,27 @@ class Face(Gtk.DrawingArea):
 
         cr.restore()
         return False
+
+    def _draw_thinking_motes(self, cr, cx, cy, r):
+        """Three soft motes drifting around the top of the head.
+
+        In place of a spinner: slow, uneven and gentle, so it reads as Toby
+        mulling something over rather than a progress bar in disguise.
+        """
+        t = time.monotonic() - self.state_since
+        for i in range(3):
+            phase = t * (0.9 + i * 0.17) + i * 2.1
+            angle = -math.pi / 2 + math.sin(phase) * 1.15
+            dist = r + 4.5 + math.sin(phase * 1.7) * 1.2
+            mx = cx + math.cos(angle) * dist
+            my = cy + math.sin(angle) * dist
+            alpha = 0.35 + 0.35 * (0.5 + 0.5 * math.sin(phase * 2.3))
+            hue = (t * 0.08 + i / 3.0) % 1.0
+            rr, gg, bb = RingFlash._hsv_to_rgb(hue, 0.45, 1.0)
+            cr.set_source_rgba(rr, gg, bb, alpha * min(1.0, t * 3))
+            cr.arc(mx, my, 1.8 + 0.5 * math.sin(phase * 3), 0, 2 * math.pi)
+            cr.fill()
+
 
 # ---------------------------------------------------------------------------
 # Rainbow ring flash — separate fullscreen transparent layer
@@ -1325,6 +1712,7 @@ class DynamicIsland(Gtk.Window):
         self.set_decorated(False)
 
         box = Gtk.EventBox()
+        self._surface = box
         box.get_style_context().add_class("apple-agent-island")
         box.get_style_context().add_class("apple-agent-surface")
         box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
@@ -1332,8 +1720,11 @@ class DynamicIsland(Gtk.Window):
         inner.set_border_width(10)
         box.add(inner)
 
+        self._progress_total = 0
+        self._progress_target = 0.0
+        self._progress_shown = 0.0
         self.dot = Gtk.DrawingArea()
-        self.dot.set_size_request(10, 10)
+        self.dot.set_size_request(16, 16)
         self.dot.connect("draw", self._draw_dot)
         inner.pack_start(self.dot, False, False, 0)
 
@@ -1414,14 +1805,45 @@ class DynamicIsland(Gtk.Window):
 
     def _draw_dot(self, widget, cr):
         w, h = widget.get_allocated_width(), widget.get_allocated_height()
+        cx, cy = w / 2, h / 2
+        r = min(w, h) / 2
         pulse = 0.6 + 0.4 * math.sin((time.monotonic() - self._pulse_t0) * 4.0)
-        cr.set_source_rgba(0.45, 0.75, 1.0, pulse)
-        cr.arc(w / 2, h / 2, min(w, h) / 2, 0, 2 * math.pi)
+        if self._progress_total:
+            # a ring that fills as steps finish, with the pulsing dot inside
+            fraction = self._progress_shown
+            cr.set_line_width(2.2)
+            cr.set_source_rgba(1, 1, 1, 0.14)
+            cr.arc(cx, cy, r - 1.2, 0, 2 * math.pi)
+            cr.stroke()
+            if fraction > 0:
+                cr.set_source_rgb(*ACCENT_RGB)
+                cr.arc(cx, cy, r - 1.2, -math.pi / 2, -math.pi / 2 + 2 * math.pi * fraction)
+                cr.stroke()
+            cr.set_source_rgba(*ACCENT_RGB, pulse)
+            cr.arc(cx, cy, r * 0.38, 0, 2 * math.pi)
+            cr.fill()
+            return False
+        cr.set_source_rgba(*ACCENT_RGB, pulse)
+        cr.arc(cx, cy, r * 0.62, 0, 2 * math.pi)
         cr.fill()
         return False
 
+    def set_progress(self, done, total, current_label=""):
+        """Show "2 of 4 · Click" and fill the ring. total 0 clears it."""
+        self._progress_total = total
+        self._progress_target = (done / total) if total else 0.0
+        if total:
+            text = f"{min(done + 1, total)} of {total}"
+            if current_label:
+                text += f"  ·  {current_label}"
+            elif done >= total:
+                text = "Done"
+            self.set_status(text)
+
     def _pulse_tick(self):
         if self.get_visible():
+            # ease the ring toward its target rather than jumping a step at a time
+            self._progress_shown += (self._progress_target - self._progress_shown) * 0.25
             self.dot.queue_draw()
         return True
 
@@ -1478,45 +1900,14 @@ class DynamicIsland(Gtk.Window):
         if self._visible_target:
             return
         self._visible_target = True
-        self.set_visible(True)
-        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, -60)
-
-        state = {"i": 0}
-        steps = 10
-
-        def step():
-            if not self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(-60, 14, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, margin)
-            return t < 1.0
-
-        GLib.timeout_add(14, step)
+        reveal(self, self._surface, "island", GtkLayerShell.Edge.TOP, -60, 14)
 
     def hide_island(self):
         self.hide_card()
         if not self._visible_target:
             return
         self._visible_target = False
-
-        state = {"i": 0}
-        steps = 10
-
-        def step():
-            if self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(14, -60, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, margin)
-            if t >= 1.0:
-                self.set_visible(False)
-                return False
-            return True
-
-        GLib.timeout_add(14, step)
+        dismiss(self, self._surface, "island", GtkLayerShell.Edge.TOP, -60)
 
 # ---------------------------------------------------------------------------
 # Island expanded view — double-click/hold the island to see this: the
@@ -1547,6 +1938,7 @@ class IslandExpanded(Gtk.Window):
         self.set_size_request(320, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-island-expanded")
         outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1603,11 +1995,11 @@ class IslandExpanded(Gtk.Window):
     def open(self, task_text, steps):
         self._task_start = time.monotonic()
         self.set_task(task_text, steps)
-        self.set_visible(True)
+        reveal(self, self._surface, "island-expanded", GtkLayerShell.Edge.TOP, 58, 70)
 
     def close(self):
         self._task_start = None
-        self.set_visible(False)
+        dismiss(self, self._surface, "island-expanded", GtkLayerShell.Edge.TOP, 62)
 
 # ---------------------------------------------------------------------------
 # Study Helper — a small persistent panel that appears (top-right) whenever
@@ -1756,6 +2148,7 @@ class StudyHelper(Gtk.Window):
         self.set_size_request(220, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-study-helper")
         outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1808,41 +2201,13 @@ class StudyHelper(Gtk.Window):
         if self._visible_target:
             return
         self._visible_target = True
-        self.set_visible(True)
-        state = {"i": 0}
-        steps = 12
-
-        def step():
-            if not self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(-260, 16, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, margin)
-            return t < 1.0
-
-        GLib.timeout_add(14, step)
+        reveal(self, self._surface, "study-helper", GtkLayerShell.Edge.RIGHT, -260, 16, "gentle")
 
     def close_helper(self):
         if not self._visible_target:
             return
         self._visible_target = False
-        state = {"i": 0}
-        steps = 10
-
-        def step():
-            if self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(16, -260, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, margin)
-            if t >= 1.0:
-                self.set_visible(False)
-                return False
-            return True
-
-        GLib.timeout_add(14, step)
+        dismiss(self, self._surface, "study-helper", GtkLayerShell.Edge.RIGHT, -260)
 
 
 # ---------------------------------------------------------------------------
@@ -1879,6 +2244,7 @@ class StudyReviewWindow(Gtk.Window):
         self.set_size_request(420, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-island-expanded")
         outer.get_style_context().add_class("apple-agent-surface")
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -1939,11 +2305,11 @@ class StudyReviewWindow(Gtk.Window):
             self.reveal_btn.set_visible(mode == "flashcards")
             self.next_btn.set_visible(True)
             self._render_current()
-        self.set_visible(True)
+        reveal(self, self._surface, "study-review")
         self.present()
 
     def close_review(self):
-        self.set_visible(False)
+        dismiss(self, self._surface, "study-review")
 
     def _clear_options(self):
         for child in self.options_box.get_children():
@@ -2034,6 +2400,7 @@ class TopicDetailWindow(Gtk.Window):
         self.set_size_request(420, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-island-expanded")
         outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -2065,7 +2432,7 @@ class TopicDetailWindow(Gtk.Window):
 
         close_btn = Gtk.Button(label="Close")
         close_btn.get_style_context().add_class("apple-agent-panel-button")
-        close_btn.connect("clicked", lambda *_: self.set_visible(False))
+        close_btn.connect("clicked", lambda *_: self.close_topic())
         box.pack_start(close_btn, False, False, 4)
 
         self.add(outer)
@@ -2090,8 +2457,11 @@ class TopicDetailWindow(Gtk.Window):
             self.links_box.pack_start(btn, False, False, 0)
         self.links_box.show_all()
 
-        self.set_visible(True)
+        reveal(self, self._surface, "topic-detail")
         self.present()
+
+    def close_topic(self):
+        dismiss(self, self._surface, "topic-detail")
 
     def _on_quiz_clicked(self, *_a):
         if self.current_topic:
@@ -2188,6 +2558,9 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     accent_wash = f"rgba({r}, {g}, {b}, 0.18)"
     accent_edge = f"rgba({r}, {g}, {b}, 0.45)"
     accent_glow = f"rgba({r}, {g}, {b}, 0.40)"
+    # hover, press and focus feedback: the "instant" duration on the
+    # "standard" curve, the same tokens every other animation uses
+    MOTION_FAST = f"{toby_anim.css_ms('instant')} {toby_anim.css_curve('standard')}"
 
     return f"""
 /* ---------------------------------------------------------------------
@@ -2210,7 +2583,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     font-size: {TYPE_BODY}px;
     caret-color: {INK_BRIGHT};
     box-shadow: none;
-    transition: border 120ms ease-out, background-color 120ms ease-out;
+    transition: border {MOTION_FAST}, background-color {MOTION_FAST};
 }}
 .apple-agent-surface entry:focus {{
     border: 1px solid {accent_edge};
@@ -2230,7 +2603,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     font-size: {TYPE_SMALL}px;
     text-shadow: none;
     box-shadow: none;
-    transition: background-color 120ms ease-out, color 120ms ease-out, border 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST}, border {MOTION_FAST};
 }}
 .apple-agent-surface button:hover {{
     color: {INK_BRIGHT};
@@ -2291,7 +2664,11 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     border: 1px solid {LINE};
     border-radius: {RADIUS_PILL}px;
     padding: 2px 6px;
-    box-shadow: 0 12px 44px alpha({SPACE_VOID}, 0.62),
+    /* A tight shadow on purpose. GTK 3 draws in software and re-blurs the
+       shadow whenever anything inside the pill repaints, which is every
+       frame the face moves; a 44px blur measured at ~18% of a CPU core
+       with the pill idle, this one at a third of that. */
+    box-shadow: 0 8px 16px alpha({SPACE_VOID}, 0.6),
                 0 1px 0 rgba(255, 255, 255, 0.05) inset;
 }}
 .apple-agent-panel-hidden {{
@@ -2310,7 +2687,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     background-color: alpha({SPACE_RAISED}, 0.94);
     border: 1px solid {LINE};
     border-radius: {RADIUS_ISLAND}px;
-    box-shadow: 0 10px 32px alpha({SPACE_VOID}, 0.6);
+    box-shadow: 0 6px 14px alpha({SPACE_VOID}, 0.6);   /* repaints while pulsing; kept tight */
 }}
 .apple-agent-island-expanded,
 .apple-agent-study-helper {{
@@ -2333,7 +2710,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     font-size: {TYPE_LEAD}px;
     caret-color: {INK_BRIGHT};
     box-shadow: none;
-    transition: box-shadow 150ms ease-out;
+    transition: box-shadow {MOTION_FAST};
 }}
 .apple-agent-entry:focus {{
     outline: none;
@@ -2358,7 +2735,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     min-height: 22px;
     font-size: {TYPE_SMALL}px;
     box-shadow: none;
-    transition: background-color 120ms ease-out, color 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST};
 }}
 .apple-agent-close:hover {{
     color: {INK_BRIGHT};
@@ -2402,7 +2779,7 @@ button.apple-agent-panel-button {{
     border-radius: {RADIUS_CONTROL}px;
     padding: 7px 14px;
     font-size: {TYPE_SMALL}px;
-    transition: background-color 120ms ease-out, color 120ms ease-out, border 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST}, border {MOTION_FAST};
 }}
 button.apple-agent-panel-button:hover {{
     color: {INK_BRIGHT};
@@ -2494,7 +2871,7 @@ button.apple-agent-nav-button {{
     border-radius: {RADIUS_CONTROL}px;
     padding: 11px 14px;
     font-size: {TYPE_BODY}px;
-    transition: background-color 120ms ease-out, color 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST};
 }}
 button.apple-agent-nav-button:hover {{
     color: {INK_BRIGHT};
@@ -2627,6 +3004,60 @@ def set_accent_rgb(hex_color):
 # Waveform view — a small live level meter for Voice Mode, driven by real mic
 # RMS values from voice_engine (not a decorative animation loop).
 # ---------------------------------------------------------------------------
+
+class FingerprintGlyph(Gtk.DrawingArea):
+    """A drawn fingerprint mark for the permission prompt.
+
+    Ridges are concentric arcs; while the reader is waiting, a highlight
+    sweeps up through them, and it turns green on a match or briefly red on
+    a miss. It animates only while a scan is running.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.set_size_request(26, 26)
+        self.connect("draw", self.on_draw)
+        self.state = "idle"        # idle | scanning | match | miss
+        self._t0 = time.monotonic()
+        self._timer = None
+
+    def set_state(self, state):
+        self.state = state
+        self._t0 = time.monotonic()
+        if state == "scanning" and self._timer is None:
+            self._timer = GLib.timeout_add(33, self._tick)
+        self.queue_draw()
+
+    def _tick(self):
+        if self.state != "scanning" or not self.get_visible():
+            self._timer = None
+            return False
+        self.queue_draw()
+        return True
+
+    def on_draw(self, widget, cr):
+        w, h = widget.get_allocated_width(), widget.get_allocated_height()
+        cx, cy = w / 2, h / 2 + 2
+        t = time.monotonic() - self._t0
+        base = {"match": (0.435, 0.902, 0.659), "miss": (1.0, 0.5, 0.5)}.get(
+            self.state, ACCENT_RGB)
+        cr.set_line_cap(cairo.LINE_CAP_ROUND)
+        cr.set_line_width(1.5)
+        sweep = (t * 0.8) % 1.0
+        for i in range(5):
+            radius = 2.5 + i * 2.3
+            level = i / 4.0
+            glow = 1.0 - min(1.0, abs(level - sweep) * 3.0) if self.state == "scanning" else 0.0
+            alpha = 0.45 + 0.55 * glow if self.state == "scanning" else 0.9
+            cr.set_source_rgba(*base, alpha)
+            cr.new_sub_path()
+            cr.arc(cx, cy, radius, math.pi * (1.05 + i * 0.02), math.pi * (1.95 - i * 0.02))
+            cr.stroke()
+            cr.new_sub_path()
+            cr.arc(cx, cy, radius, math.pi * 0.15, math.pi * (0.7 - i * 0.05))
+            cr.stroke()
+        return False
+
 
 class WaveformView(Gtk.DrawingArea):
     BARS = 24
@@ -2808,6 +3239,122 @@ class MemoryGraphView(Gtk.DrawingArea):
         return True
 
 
+class RemoteServices:
+    """What a paired phone can ask of Toby (see RemoteBridge for the API).
+
+    These run on the bridge's request threads. Reads come from thread-safe
+    sources (the task log, the job list, /proc); anything that touches the
+    interface is handed to the GTK thread with GLib.idle_add.
+    """
+
+    def __init__(self, window):
+        self.w = window
+
+    def ask(self, text, device):
+        w = self.w
+        if w._busy:
+            return False, "Toby is still working on the last thing. Try again in a moment.", None
+        w._busy = True
+        origin = f"phone:{device['name']}"
+        task_id = TASKS.start(text, origin)
+        GLib.idle_add(w._remote_ask, text, origin, task_id)
+        return True, "Sent.", task_id
+
+    def task_control(self, action, device):
+        w = self.w
+        if not w._busy:
+            return False, "Toby isn't working on anything right now."
+        task_id = w.current_task_id
+        if action == "pause":
+            if not w._resume_event.is_set():
+                return True, "Already paused."
+            w._resume_event.clear()
+            for job in JOBS.running():
+                if job.task_id == task_id:
+                    JOBS.pause(job.id)
+            w._set_task_state("paused")
+            GLib.idle_add(lambda: w.island.show_island("Paused from your phone") and False)
+            return True, "Paused."
+        if action == "resume":
+            for job in JOBS.all():
+                if job.task_id == task_id and job.state == jobs.PAUSED:
+                    JOBS.resume(job.id)
+            w._resume_event.set()
+            w._set_task_state("working")
+            return True, "Carrying on."
+        if action == "stop":
+            GLib.idle_add(lambda: w.on_task_cancel() or False)
+            return True, "Stopping."
+        return False, f"Unknown action {action!r}."
+
+    def approve(self, approval_id, allow, device):
+        return self.w.approvals.answer(approval_id, allow, by=device["name"], from_phone=True)
+
+    def status(self):
+        w = self.w
+        status = computer_tools.system_status()
+        task = TASKS.get(w.current_task_id) if w._busy and w.current_task_id else None
+        status["toby"] = {"busy": w._busy, "model": _active_model(), "power": w._power_state,
+                          "current_task": task["text"] if task else None,
+                          "work_mode": bool(SETTINGS.get("work_mode", False))}
+        status["policy"] = {"screen_view": bool(SETTINGS.get("remote_screen_view", False)),
+                            "restricted_actions": bool(SETTINGS.get("allow_restricted_actions", False))}
+        status["jobs_running"] = len(JOBS.running())
+        return status
+
+    def tasks(self):
+        return TASKS.recent(20)
+
+    def task(self, task_id):
+        task = TASKS.get(task_id)
+        if task is None:
+            return None
+        if task_id == self.w.current_task_id and self.w._busy:
+            task["steps"] = self.w._live_steps()
+        task["job_details"] = [j.summary() for j in (JOBS.get(jid) for jid in task.get("jobs", [])) if j]
+        return task
+
+    def jobs(self):
+        return [j.summary() for j in reversed(JOBS.all())]
+
+    def job(self, job_id, lines):
+        job = JOBS.get(job_id)
+        return None if job is None else dict(job.summary(), output=job.tail(lines))
+
+    def screen(self, view, max_width):
+        if not SETTINGS.get("remote_screen_view", False):
+            return None, "screen_view_off"
+        return SCREEN.capture(view, max_width)
+
+    def overview(self):
+        windows = computer_tools.list_windows()
+        screen = self.w.get_screen()
+        return {"windows": windows, "screen": {"width": screen.get_width(), "height": screen.get_height()},
+                "screen_view": bool(SETTINGS.get("remote_screen_view", False))}
+
+    def files(self):
+        w = self.w
+        if w._busy:
+            live = [{"path": p, "action": a} for p, a in computer_tools.touched()]
+            if live:
+                return live
+        last = TASKS.last_finished()
+        return last.get("files", []) if last else []
+
+    def focus_window(self, address, device):
+        if not re.fullmatch(r"0x[0-9a-fA-F]{1,16}", address or ""):
+            return False, "That isn't a window address."
+        message = computer_tools.focus_window(address=address)
+        return message.startswith("Switched"), message
+
+    def set_work_mode(self, on, device):
+        GLib.idle_add(lambda: self.w.set_work_mode(on) and False)
+        return True, "Work Mode is on." if on else "Work Mode is off."
+
+    def device_revoked(self, device):
+        GLib.idle_add(lambda: self.w._refresh_phone_settings() and False)
+
+
 class AssistantWindow(Gtk.Window):
     def __init__(self, ring: RingFlash):
         super().__init__()
@@ -2816,13 +3363,35 @@ class AssistantWindow(Gtk.Window):
         self.current_mood = "neutral"
         self.expanded = False
         self._panel_generation = 0
-        self._confirm_event = threading.Event()
-        self._confirm_result = False
+        # One queue of "Toby wants to do this. Allow?" questions, answered from
+        # the pill or a paired phone. The newest task's record, its origin, and
+        # how far through its steps the task thread has got.
+        self.approvals = approvals.ApprovalCenter(
+            on_change=lambda: GLib.idle_add(self._on_approvals_changed))
+        self._shown_approval = None
+        self.current_task_id = None
+        self._task_origin = "computer"
+        self._next_origin = None
+        self._next_task_id = None
+        self._worker_steps = 1
+        self._thinking_step = 0
+        self.task_step_details = {}
+        self._resume_event = threading.Event()
+        self._resume_event.set()
+        self._power_state = "awake"
+        self._install_job_tools()
+        self.work = work_mode.WorkMode(screen_control, windows=computer_tools.list_windows,
+                                       settings=lambda: SETTINGS, cursor=self._pen_cursor)
+        self._install_work_tools()
 
+        self._hiding = False
+        self._fullscreen = False
+        self._deferred_card = None
+        self._fingerprint_ready = False
+        self._fingerprint_scan = None
         self.school_mode_config = school_mode.load_config()
         self.school_scheduled_active = False
         self._adaptive_check_running = False
-        self._action_confirm_pending = False
         self._today_count = 0
         self._today_count_at = 0.0
 
@@ -2971,7 +3540,10 @@ class AssistantWindow(Gtk.Window):
         self.confirm_row.set_margin_start(48)
         self.confirm_row.set_no_show_all(True)
         self.current.pack_start(self.confirm_row, False, True, 0)
-        confirm_label = Gtk.Label(label="Control screen enable?")
+        self.fingerprint_glyph = FingerprintGlyph()
+        self.fingerprint_glyph.set_no_show_all(True)
+        self.confirm_row.pack_start(self.fingerprint_glyph, False, False, 0)
+        confirm_label = Gtk.Label(label=self.CONFIRM_TEXT)
         self.confirm_label = confirm_label
         self.confirm_row.pack_start(confirm_label, False, False, 0)
         yes_btn = Gtk.Button(label="Yes")
@@ -3012,6 +3584,7 @@ class AssistantWindow(Gtk.Window):
         # background directly on itself, which is exactly why this was
         # rendering transparent.
         sidebar_outer = Gtk.EventBox()
+        self.sidebar_surface = sidebar_outer
         sidebar_outer.get_style_context().add_class("apple-agent-sidebar-window")
         sidebar_outer.get_style_context().add_class("apple-agent-surface")
         self.sidebar_window.add(sidebar_outer)
@@ -3033,7 +3606,7 @@ class AssistantWindow(Gtk.Window):
 
         self.content_stack = Gtk.Stack()
         self.content_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.content_stack.set_transition_duration(150)
+        self.content_stack.set_transition_duration(int(toby_anim.DURATIONS["quick"] * 1000))
         self.expanded_area.pack_start(self.content_stack, True, True, 0)
 
         self.nav_buttons = {}
@@ -3249,7 +3822,7 @@ class AssistantWindow(Gtk.Window):
         model_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         model_row.pack_start(Gtk.Label(label="Ollama model override"), False, False, 0)
         self.settings_model_entry = Gtk.Entry()
-        self.settings_model_entry.set_placeholder_text(f"blank = {OLLAMA_MODEL}")
+        self.settings_model_entry.set_placeholder_text("blank = the best one you have installed")
         self.settings_model_entry.set_text(SETTINGS.get("ollama_model", ""))
         model_row.pack_start(self.settings_model_entry, True, True, 0)
         settings_page.pack_start(model_row, False, False, 0)
@@ -3385,6 +3958,30 @@ class AssistantWindow(Gtk.Window):
         camera_record_hint.set_line_wrap(True)
         camera_record_hint.get_style_context().add_class("apple-agent-dashboard-title")
         settings_page.pack_start(camera_record_hint, False, False, 4)
+
+        self._build_animation_settings(settings_page)
+        self._build_phone_settings(settings_page)
+        self._build_work_mode_settings(settings_page)
+
+        fp_separator = Gtk.Label(label="Fingerprint")
+        fp_separator.set_xalign(0)
+        fp_separator.get_style_context().add_class("apple-agent-section-heading")
+        settings_page.pack_start(fp_separator, False, False, 6)
+        fp_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        fp_row.pack_start(Gtk.Label(label="Approve permission prompts with your fingerprint"),
+                          False, False, 0)
+        self.settings_fingerprint_switch = Gtk.Switch()
+        self.settings_fingerprint_switch.set_active(SETTINGS.get("confirm_with_fingerprint", False))
+        fp_row.pack_end(self.settings_fingerprint_switch, False, False, 0)
+        settings_page.pack_start(fp_row, False, False, 0)
+        fp_note = Gtk.Label(
+            label="Uses fprintd, the standard Linux fingerprint service. Toby only hears "
+                  "\"matched\" or \"didn't\" — nothing about your fingerprint itself. The Yes "
+                  "and No buttons keep working. Enrol a finger first with: fprintd-enroll")
+        fp_note.set_xalign(0)
+        fp_note.set_line_wrap(True)
+        fp_note.get_style_context().add_class("apple-agent-dashboard-title")
+        settings_page.pack_start(fp_note, False, False, 4)
 
         cloud_separator = Gtk.Label(label="Cloud AI (optional)")
         cloud_separator.set_xalign(0)
@@ -3525,6 +4122,20 @@ class AssistantWindow(Gtk.Window):
             on_gesture=self.on_camera_gesture,
             on_state=self.on_camera_state,
         )
+        # React to the desktop: a glance toward the workspace you switched
+        # to, a raised brow when a window opens. Read-only, and it reconnects
+        # by itself if Hyprland restarts.
+        self._last_workspace = None
+        self.hypr_listener = hypr_events.HyprEventListener(
+            lambda name, data: GLib.idle_add(self._on_desktop_event, name, data))
+        self.hypr_listener.start()
+        if SETTINGS.get("confirm_with_fingerprint"):
+            self._check_fingerprint_reader()
+
+        self.chibi_director = chibi.ChibiDirector(toby_anim.animation_settings(SETTINGS))
+        ChibiStage = chibi.make_stage_class()
+        self.chibi_stage = ChibiStage(self.chibi_director, accent_getter=lambda: ACCENT_RGB)
+
         self.camera_overlay = CameraOverlay()
         self._camera_recording_name = None
         self._pending_camera_action_for_record = None
@@ -3556,6 +4167,263 @@ class AssistantWindow(Gtk.Window):
         saved_accent = SETTINGS.get("accent_color", "")
         if len(saved_accent) == 7 and saved_accent.startswith("#"):
             self.apply_accent_color(saved_accent)
+        # last, so everything it reports on already exists
+        self._start_remote_bridge()
+        threading.Thread(target=self._desktop_setup, daemon=True).start()
+        if SETTINGS.get("startup_greeting", True):
+            GLib.timeout_add(900, self._startup_greeting)
+
+    def _desktop_setup(self):
+        """Runtime-only Hyprland additions: the summon key and, if you turned
+        them on, Toby's window animations. Nothing is written to your config;
+        a Hyprland reload removes both, and they're re-added next start."""
+        combo = SETTINGS.get("summon_keybind", "SUPER, G")
+        if combo:
+            status = hypr_keybind.ensure(combo)
+            if status.startswith("taken"):
+                print(f"KEYBIND: {combo} is already {status}; summon Toby with `toby` instead", flush=True)
+        anim = toby_anim.animation_settings(SETTINGS)
+        if anim["hypr_animations_enabled"]:
+            hypr_animations.apply(anim["hypr_animation_speed"])
+
+    def _startup_greeting(self):
+        """Pop up briefly at login, say hello, and tuck away again.
+
+        Once per login: a marker in the runtime directory (cleared when you
+        log out) stops a restart from greeting you again.
+        """
+        if self.get_visible() or self._fullscreen:
+            return False
+        marker = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "little-toby-greeted"
+        if marker.exists():
+            return False
+        try:
+            marker.touch()
+        except OSError:
+            pass
+        self.show_panel()
+        self.answer.set_text("Hi, I'm here. Press Super+G whenever you need me.")
+        self.answer.set_visible(True)
+        self.answer.show()
+        GLib.timeout_add(3200, lambda: (self.hide_panel() if not self._busy
+                                        and not self.entry.get_text() else None) and False)
+        return False
+
+    def _on_desktop_event(self, name, data):
+        if name == "fullscreen":
+            # Something went fullscreen (a video, a game) or came back. Toby
+            # holds its unrequested interruptions until it's over.
+            self._fullscreen = data.strip() == "1"
+            if not self._fullscreen and self._deferred_card:
+                asked, reply = self._deferred_card
+                self._deferred_card = None
+                GLib.timeout_add(int(toby_anim.DURATIONS["gentle"] * 1000),
+                                 lambda: self._show_reply_card(asked, reply) or False)
+            return False
+        direction = 0.0
+        if name in ("workspace", "workspacev2"):
+            ident = data.split(",")[0]
+            try:
+                number = int(ident)
+                if self._last_workspace is not None:
+                    direction = 1.0 if number > self._last_workspace else -1.0
+                self._last_workspace = number
+            except ValueError:
+                direction = 1.0
+        self.face.react(name, direction)
+        return False
+
+    # -- jobs -------------------------------------------------------------------------
+    def _install_job_tools(self):
+        """The tools that need the running task and the job list."""
+        def run(a):
+            self._set_task_state("waiting")
+            try:
+                text, job = computer_tools.run_command(
+                    JOBS, str(a.get("command", "")), a.get("cwd", "~"), bool(a.get("background")),
+                    task_id=self.current_task_id, cancel_check=lambda: self.task_cancelled)
+            finally:
+                self._set_task_state("working")
+            if job is not None and self.current_task_id:
+                TASKS.add_job(self.current_task_id, job.id)
+            return text
+
+        def download(a):
+            text, job = computer_tools.download_file(JOBS, a.get("url", ""), a.get("to", "~/Downloads"),
+                                                     task_id=self.current_task_id)
+            if job is not None:
+                JOBS.watch(job.id)
+                if self.current_task_id:
+                    TASKS.add_job(self.current_task_id, job.id)
+            return text
+
+        def status(a):
+            job = JOBS.get(a.get("job", "latest"))
+            if job is None:
+                return "Toby isn't running any jobs right now."
+            tail = "\n".join(job.tail(12))
+            return f"{job.describe()}\nLatest output:\n{tail}" if tail else job.describe()
+
+        def watch(a):
+            job = JOBS.watch(a.get("job", "latest"), a.get("on_fail", "notify"))
+            if job is None:
+                return "There's no job to keep an eye on."
+            retry = " If it fails, Toby will try once more." if job.on_fail == "retry" else ""
+            return f"Watching '{job.name}': you'll get a notification when it finishes.{retry}"
+
+        DISPATCH.update({"run_command": run, "download_file": download, "job_status": status,
+                         "watch_job": watch})
+        JOBS.on_finish = lambda job: GLib.idle_add(self._on_job_finished, job)
+        JOBS.on_change = lambda: GLib.idle_add(lambda: self._publish_remote_state() and False)
+
+    def _on_job_finished(self, job):
+        task = TASKS.get(job.task_id) if job.task_id else None
+        from_phone = bool(task and str(task.get("origin", "")).startswith("phone"))
+        if job.watched or from_phone:
+            kind = "job_done" if job.state == jobs.SUCCEEDED else "job_failed"
+            if job.state != jobs.STOPPED:
+                self._event(kind, job.describe(), job.tail(1)[0][:200] if job.tail(1) else "")
+        if not self._busy and job.state in (jobs.SUCCEEDED, jobs.FAILED) and (job.watched or from_phone):
+            self.island.show_island(job.describe()[:60])
+            GLib.timeout_add_seconds(5, lambda: self.island.hide_island() or False)
+        self._publish_remote_state(force=True)
+        return False
+
+    def _event(self, kind, title, body=""):
+        """A notification for paired phones, if they want this kind."""
+        remote = getattr(self, "remote", None)
+        if remote is not None and notify.wanted(kind, SETTINGS):
+            remote.events.add(kind, title, body)
+
+    # -- the phone app ---------------------------------------------------------------
+    def _start_remote_bridge(self):
+        """Serve the phone apps, if you've turned it on (`toby phone on`)."""
+        self.remote = None
+        self._busy = False
+        self._remote_reply = ""
+        self._last_remote_publish = 0.0
+        self._viewing_shown = False
+        self._watch_power()
+        if not SETTINGS.get("remote_enabled"):
+            return
+        try:
+            store = remote_bridge.DeviceStore()
+            self.remote = remote_bridge.RemoteBridge(
+                RemoteServices(self), store, host=SETTINGS.get("remote_bind", "127.0.0.1"),
+                port=int(SETTINGS.get("remote_port", 8765)),
+                name=remote_bridge.computer_name(SETTINGS))
+            self.remote.pairing.on_claim = self._on_pairing_claim
+            ntfy = SETTINGS.get("notify_ntfy_url", "")
+            if ntfy:
+                self.remote.events.listeners.append(notify.NtfySender(ntfy, lambda: SETTINGS))
+            self.remote.start()
+            self._publish_remote_state(force=True)
+            self._refresh_phone_settings()
+            GLib.timeout_add_seconds(1, self._check_screen_viewing)
+        except OSError as e:
+            print(f"PHONE BRIDGE: couldn't start ({e}); the phone app won't connect", flush=True)
+            self.remote = None
+
+    def _on_pairing_claim(self, claim):
+        """A phone presented a valid pairing code: ask here, and only here."""
+        def ask():
+            compare = f"{claim['compare'][:3]} {claim['compare'][3:]}"
+            allowed = self.approvals.ask(
+                f"Pair {claim['name']} with this computer?", kind="pairing", local_only=True,
+                details=[f"Only say yes if your phone shows {compare}.",
+                         "A paired phone can ask Toby to do anything you could ask here."])
+            if self.remote is not None:
+                self.remote.pairing.decide(claim["id"], allowed)
+                if allowed:
+                    self.remote.events.add("device", f"{claim['name']} is paired", "")
+            GLib.idle_add(lambda: self._refresh_phone_settings() and False)
+        threading.Thread(target=ask, daemon=True).start()
+
+    def _check_screen_viewing(self):
+        """While a phone is looking at the screen, say so on the computer."""
+        if self.remote is None:
+            return False
+        viewing = bool(SCREEN.viewing())
+        if viewing and not self._viewing_shown:
+            self._viewing_shown = True
+            self.island.show_island("Your phone is viewing this screen")
+        elif not viewing and self._viewing_shown:
+            self._viewing_shown = False
+            if not self._busy:
+                self.island.hide_island()
+        return True
+
+    def _watch_power(self):
+        """Tell phones before the computer sleeps, so they can say "asleep"
+        rather than "can't connect". logind announces it; the lid fold holds
+        sleep back long enough for this to go out."""
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except GLib.Error:
+            return
+        def on_signal(_conn, _sender, _path, _iface, name, params, _data=None):
+            going = bool(params.unpack()[0])
+            if name == "PrepareForSleep":
+                self._power_state = "sleeping" if going else "awake"
+                if going:
+                    self._event("power", "Your computer is going to sleep", "")
+            elif name == "PrepareForShutdown" and going:
+                self._power_state = "shutting_down"
+                self._event("power", "Your computer is shutting down", "")
+            self._publish_remote_state(force=True)
+        for signal_name in ("PrepareForSleep", "PrepareForShutdown"):
+            bus.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager", signal_name,
+                                 "/org/freedesktop/login1", None, Gio.DBusSignalFlags.NONE, on_signal)
+        self._system_bus = bus
+
+    def _remote_ask(self, text, origin="phone", task_id=None):
+        self._next_origin = origin
+        self._next_task_id = task_id
+        self.entry.set_text(text)
+        self.on_submit(self.entry)
+        return False
+
+    def _live_steps(self):
+        return [{"label": label, "status": status, "detail": self.task_step_details.get(i, "")}
+                for i, (label, status) in enumerate(self.task_steps) if label != "Thinking"]
+
+    def _publish_remote_state(self, force=False):
+        """Tell connected phones what Toby is doing right now."""
+        remote = getattr(self, "remote", None)
+        if remote is None:
+            return False
+        now = time.monotonic()
+        if not force and now - self._last_remote_publish < 0.2:
+            return False   # streaming text arrives fast; a few updates a second is plenty
+        self._last_remote_publish = now
+        steps = self._live_steps()
+        history = [{"role": m["role"], "content": m["content"][:400]} for m in self.history[-8:]]
+        record = TASKS.get(self.current_task_id) if self.current_task_id else None
+        task = None
+        if record is not None:
+            task = {k: record[k] for k in ("id", "text", "origin", "state", "created", "ended", "error")}
+            task["steps"] = steps if self._busy else record["steps"]
+            task["reply"] = self._remote_reply or record["reply"]
+        approvals_for_phone = [{k: a[k] for k in ("id", "kind", "level", "title", "details", "reason",
+                                                   "created", "expires")}
+                               for a in self.approvals.pending(for_phone=True)]
+        confirm = ({"pending": True, "text": approvals_for_phone[0]["title"]}
+                   if approvals_for_phone else None)
+        remote.publish({
+            "busy": self._busy,
+            "task": task,
+            "steps": [{"label": st["label"], "status": st["status"]} for st in steps],
+            "reply": self._remote_reply,
+            "confirm": confirm,
+            "approvals": approvals_for_phone,
+            "history": history,
+            "jobs": [j.summary() for j in list(reversed(JOBS.all()))[:8]],
+            "work_mode": bool(SETTINGS.get("work_mode", False)),
+            "power": self._power_state,
+            "screen_view": bool(SETTINGS.get("remote_screen_view", False)),
+            "viewing": bool(SCREEN.viewing()),
+        })
+        return False
 
     def on_island_click(self):
         self.show_panel()
@@ -3567,12 +4435,13 @@ class AssistantWindow(Gtk.Window):
         self.task_cancelled = True
         self._set_task_step_status(self._current_step_index(), "error")
         self.island.set_status("Cancelling…")
-        if not self._confirm_event.is_set():
-            # if a confirm dialog is mid-wait, treat Cancel as "No" so the
-            # background thread doesn't sit blocked waiting for an answer
-            self._confirm_result = False
-            self.confirm_row.set_visible(False)
-            self._confirm_event.set()
+        # A question the task is waiting on counts as "no" (the wait polls
+        # task_cancelled); a paused task is released so it can stop; and
+        # anything the task started running in the foreground is stopped.
+        self._resume_event.set()
+        for job in JOBS.running():
+            if job.task_id == self.current_task_id and not job.watched:
+                JOBS.stop(job.id)
 
     def _current_step_index(self):
         for i, (_label, status) in enumerate(self.task_steps):
@@ -3580,15 +4449,31 @@ class AssistantWindow(Gtk.Window):
                 return i
         return -1
 
-    def _set_task_step_status(self, index, status):
+    def _set_task_step_status(self, index, status, detail=None):
         if 0 <= index < len(self.task_steps):
             label, _old = self.task_steps[index]
             self.task_steps[index] = (label, status)
+            if detail is not None:
+                self.task_step_details[index] = detail
         if self.island_expanded.get_visible():
             self.island_expanded.set_task(self.task_label_text, self.task_steps)
+        self._sync_chibi_steps()
+        self._update_island_progress()
+        self._publish_remote_state()
 
     # -- animation driver --------------------------------------------------
+    IDLE_FRAME_DIVISOR = 3   # idle breathing at a third of the frame rate
+
     def tick(self):
+        # Nothing of the face is on screen while the pill is hidden, so do no
+        # work at all; when it's idle, draw every third frame. Measured with
+        # the pill open and idle, this took the app from ~18% of a core to
+        # a few percent.
+        if not self.get_visible() and not self._hiding:
+            return True
+        self._tick_count = getattr(self, "_tick_count", 0) + 1
+        if not self.face.needs_full_frame_rate() and self._tick_count % self.IDLE_FRAME_DIVISOR:
+            return True
         self._update_gaze_toward_cursor()
         self.face.tick(self.current_mood)
         if self.get_visible() and self.face.state == State.IDLE:
@@ -3634,6 +4519,7 @@ class AssistantWindow(Gtk.Window):
         # double-clicks ourselves off plain BUTTON_PRESS events instead.
         if event.type != Gdk.EventType.BUTTON_PRESS:
             return False
+        self.face.tap()
         now = time.monotonic()
         last_click = getattr(self, "_last_face_click_time", 0.0)
         self._last_face_click_time = now
@@ -3651,10 +4537,11 @@ class AssistantWindow(Gtk.Window):
             self.refresh_dashboard()
             self.refresh_memory_graph()
             self.refresh_study_plan_grid()
-            self.sidebar_window.set_visible(True)
+            reveal(self.sidebar_window, self.sidebar_surface, "sidebar",
+                   GtkLayerShell.Edge.TOP, 56, 80, "gentle")
             self.sidebar_window.present()
         else:
-            self.sidebar_window.set_visible(False)
+            dismiss(self.sidebar_window, self.sidebar_surface, "sidebar", GtkLayerShell.Edge.TOP, 64)
         self.input_shape_combine_region(None)
 
     def switch_nav(self, key):
@@ -3834,10 +4721,291 @@ class AssistantWindow(Gtk.Window):
         SETTINGS["cloud_api_key"] = self.settings_cloud_key_entry.get_text().strip()
         SETTINGS["cloud_model"] = self.settings_cloud_model_entry.get_text().strip() or "gpt-4o"
         SETTINGS["voice_auto_cloud"] = self.settings_voice_auto_cloud_switch.get_active()
+        animations_before = toby_anim.animation_settings(SETTINGS)
+        SETTINGS["animations"] = {**SETTINGS.get("animations", {}), **self._collect_animation_settings()}
+        self._apply_animation_settings(animations_before)
+        SETTINGS["confirm_with_fingerprint"] = self.settings_fingerprint_switch.get_active()
+        if SETTINGS["confirm_with_fingerprint"]:
+            self._check_fingerprint_reader()
 
         toby_settings.save(SETTINGS)
         self.settings_save_status.set_text("Saved.")
         GLib.timeout_add_seconds(3, lambda: self.settings_save_status.set_text("") or False)
+
+    # -- Work Mode settings -------------------------------------------------------
+    def _build_work_mode_settings(self, page):
+        heading = Gtk.Label(label="Work Mode")
+        heading.set_xalign(0)
+        heading.get_style_context().add_class("apple-agent-section-heading")
+        page.pack_start(heading, False, False, 6)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        text = Gtk.Label(label="Work on the screen with a pen, mouse and keyboard")
+        text.set_tooltip_text("Toby looks at the screen, finds things by their text, and clicks, drags, "
+                              "circles, underlines, highlights and writes by hand, checking each result. "
+                              "Uses the same mouse-and-keyboard permission as everything else.")
+        row.pack_start(text, False, False, 0)
+        self.settings_work_mode_switch = Gtk.Switch()
+        self.settings_work_mode_switch.set_active(bool(SETTINGS.get("work_mode", False)))
+        self.settings_work_mode_switch.connect(
+            "notify::active", lambda sw, _p: sw.get_active() != bool(SETTINGS.get("work_mode"))
+            and self.set_work_mode(sw.get_active()))
+        row.pack_end(self.settings_work_mode_switch, False, False, 0)
+        page.pack_start(row, False, False, 0)
+
+    # -- phone settings ------------------------------------------------------------
+    def _build_phone_settings(self, page):
+        """Connect a phone, see and revoke paired phones, and the two
+        switches that decide how much a phone may do."""
+        heading = Gtk.Label(label="Phone")
+        heading.set_xalign(0)
+        heading.get_style_context().add_class("apple-agent-section-heading")
+        page.pack_start(heading, False, False, 6)
+
+        self.phone_status = Gtk.Label(label="")
+        self.phone_status.set_xalign(0)
+        self.phone_status.set_line_wrap(True)
+        page.pack_start(self.phone_status, False, False, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.phone_connect_btn = Gtk.Button(label="Connect a phone")
+        self.phone_connect_btn.connect("clicked", lambda *_: self._start_phone_pairing())
+        buttons.pack_start(self.phone_connect_btn, False, False, 0)
+        page.pack_start(buttons, False, False, 0)
+
+        self.phone_pair_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.phone_pair_box.set_no_show_all(True)
+        self.phone_qr = Gtk.Image()
+        self.phone_qr.set_halign(Gtk.Align.START)
+        self.phone_pair_box.pack_start(self.phone_qr, False, False, 0)
+        self.phone_pair_label = Gtk.Label(label="")
+        self.phone_pair_label.set_xalign(0)
+        self.phone_pair_label.set_line_wrap(True)
+        self.phone_pair_label.set_selectable(True)
+        self.phone_pair_box.pack_start(self.phone_pair_label, False, False, 0)
+        page.pack_start(self.phone_pair_box, False, False, 0)
+
+        self.phone_devices_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        page.pack_start(self.phone_devices_box, False, False, 0)
+
+        for key, label, hint in (
+                ("remote_screen_view", "Let paired phones see the screen",
+                 "Off by default. While a phone is looking, Toby says so here."),
+                ("allow_restricted_actions", "Allow restricted actions",
+                 "sudo, deleting folders, anything outside your home folder. Toby still asks each time.")):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            text = Gtk.Label(label=label)
+            text.set_tooltip_text(hint)
+            row.pack_start(text, False, False, 0)
+            switch = Gtk.Switch()
+            switch.set_active(bool(SETTINGS.get(key, False)))
+            switch.set_tooltip_text(hint)
+
+            def changed(sw, _param, key=key):
+                SETTINGS[key] = sw.get_active()
+                toby_settings.save(SETTINGS)
+                self._publish_remote_state(force=True)
+            switch.connect("notify::active", changed)
+            row.pack_end(switch, False, False, 0)
+            page.pack_start(row, False, False, 0)
+        self._refresh_phone_settings()
+
+    def _refresh_phone_settings(self):
+        if not hasattr(self, "phone_status"):
+            return False
+        for child in self.phone_devices_box.get_children():
+            self.phone_devices_box.remove(child)
+        if not SETTINGS.get("remote_enabled"):
+            self.phone_status.set_text("The phone connection is off. Turn it on with `toby phone on` in a "
+                                       "terminal (it sets up Tailscale so your phone can reach Toby anywhere).")
+            self.phone_connect_btn.set_sensitive(False)
+            return False
+        self.phone_connect_btn.set_sensitive(getattr(self, "remote", None) is not None)
+        devices = remote_bridge.DeviceStore().devices()
+        self.phone_status.set_text(f"{len(devices)} phone{'s' if len(devices) != 1 else ''} paired."
+                                   if devices else "No phones paired yet.")
+        for device in devices:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            seen = (time.strftime("last used %d %b %H:%M", time.localtime(device["last_seen"]))
+                    if device.get("last_seen") else "not used yet")
+            label = Gtk.Label(label=f"{device['name']}  ·  {seen}")
+            label.set_xalign(0)
+            row.pack_start(label, True, True, 0)
+            revoke = Gtk.Button(label="Unpair")
+
+            def unpair(_b, device_id=device["id"]):
+                remote_bridge.DeviceStore().revoke(device_id)
+                self._refresh_phone_settings()
+            revoke.connect("clicked", unpair)
+            row.pack_end(revoke, False, False, 0)
+            self.phone_devices_box.pack_start(row, False, False, 0)
+        self.phone_devices_box.show_all()
+        return False
+
+    def _start_phone_pairing(self):
+        """Show a pairing QR code and code, from a fresh one-time session."""
+        if getattr(self, "remote", None) is None:
+            return
+        self.phone_pair_label.set_text("Starting…")
+        self.phone_pair_box.set_visible(True)
+        self.phone_pair_label.show()
+
+        def worker():
+            name = remote_bridge.tailscale_name()
+            base = f"https://{name}" if name else ""
+            session = self.remote.pairing.start(base)
+            png = None
+            if base:
+                try:
+                    out = subprocess.run(["qrencode", "-t", "PNG", "-s", "6", "-m", "2", "-o", "-",
+                                          session["url"]], capture_output=True, timeout=5)
+                    png = out.stdout if out.returncode == 0 else None
+                except (OSError, subprocess.TimeoutExpired):
+                    png = None
+            GLib.idle_add(self._show_phone_pairing, session, base, png)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_phone_pairing(self, session, base, png):
+        if png:
+            loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+            loader.write(png)
+            loader.close()
+            self.phone_qr.set_from_pixbuf(loader.get_pixbuf())
+            self.phone_qr.show()
+        else:
+            self.phone_qr.hide()
+        if base:
+            text = (f"In Little Toby on your iPhone, tap Pair a computer and scan this, or type "
+                    f"{base} and the code {session['display_code']}. The code works once, for five "
+                    f"minutes. You'll be asked here before the phone is paired.")
+        else:
+            text = ("Tailscale isn't set up, so a phone can't reach this computer from elsewhere. Install "
+                    "it on this computer and your phone and run `sudo tailscale up`, then try again. "
+                    f"(On this Wi-Fi only, with remote_bind set: code {session['display_code']}.)")
+        self.phone_pair_label.set_text(text)
+        return False
+
+    # -- animation settings ------------------------------------------------------
+    ANIMATION_SWITCHES = [
+        ("enabled", "Animations"),
+        ("reduce_motion", "Reduce motion"),
+        ("fold_enabled", "Lid fold when the laptop sleeps"),
+        ("chibi_enabled", "Toby walks out and does tasks on screen"),
+        ("idle_enabled", "Idle life (breathing, blinking)"),
+        ("desktop_reactions", "React when windows and workspaces change"),
+        ("appear_enabled", "Fade in and out"),
+        ("hypr_animations_enabled", "Toby-style window and workspace animations"),
+    ]
+    ANIMATION_SLIDERS = [
+        # key, label, low, high, step, how to show the value
+        ("fold_close_duration", "Fold speed", 0.3, 1.2, 0.02, lambda v: f"{v:.2f}s"),
+        ("fold_strength", "Fold strength", 0.0, 1.5, 0.05, lambda v: f"{v:.0%}"),
+        ("fold_perspective", "Fold perspective", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("fold_blur", "Motion blur", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("fold_zoom", "Shrink toward centre", 0.0, 0.2, 0.01, lambda v: f"{v:.0%}"),
+        ("idle_intensity", "Idle liveliness", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("interaction_intensity", "Tap reaction", 0.0, 2.0, 0.05, lambda v: f"{v:.0%}"),
+        ("chibi_walk_speed", "Walking speed", 300.0, 2000.0, 50.0, lambda v: f"{v:.0f} px/s"),
+    ]
+
+    def _build_animation_settings(self, page):
+        heading = Gtk.Label(label="Animations")
+        heading.set_xalign(0)
+        heading.get_style_context().add_class("apple-agent-section-heading")
+        page.pack_start(heading, False, False, 6)
+        current = toby_anim.animation_settings(SETTINGS)
+
+        self.animation_switches = {}
+        for key, label in self.ANIMATION_SWITCHES:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            row.pack_start(Gtk.Label(label=label), False, False, 0)
+            switch = Gtk.Switch()
+            switch.set_active(bool(SETTINGS.get("animations", {}).get(
+                key, toby_anim.ANIMATION_DEFAULTS[key])))
+            row.pack_end(switch, False, False, 0)
+            page.pack_start(row, False, False, 0)
+            self.animation_switches[key] = switch
+
+        self.animation_sliders = {}
+        grid = Gtk.Grid(column_spacing=12, row_spacing=6)
+        for i, (key, label, low, high, step, fmt) in enumerate(self.ANIMATION_SLIDERS):
+            name = Gtk.Label(label=label)
+            name.set_xalign(0)
+            scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, low, high, step)
+            scale.set_draw_value(False)
+            scale.set_hexpand(True)
+            scale.set_value(current[key])
+            value = Gtk.Label(label=fmt(current[key]))
+            value.set_xalign(1)
+            value.set_width_chars(8)
+            value.get_style_context().add_class("apple-agent-dashboard-title")
+            scale.connect("value-changed", lambda sc, lbl=value, f=fmt: lbl.set_text(f(sc.get_value())))
+            grid.attach(name, 0, i, 1, 1)
+            grid.attach(scale, 1, i, 1, 1)
+            grid.attach(value, 2, i, 1, 1)
+            self.animation_sliders[key] = scale
+        page.pack_start(grid, False, False, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        preview = Gtk.Button(label="Preview the fold")
+        preview.get_style_context().add_class("apple-agent-panel-button")
+        preview.connect("clicked", lambda *_: self._preview_fold())
+        buttons.pack_start(preview, False, False, 0)
+        defaults = Gtk.Button(label="Reset to defaults")
+        defaults.get_style_context().add_class("apple-agent-panel-button")
+        defaults.connect("clicked", lambda *_: self._reset_animation_controls())
+        buttons.pack_start(defaults, False, False, 0)
+        page.pack_start(buttons, False, False, 4)
+
+        note = Gtk.Label(
+            label="The fold plays when the laptop goes to sleep, and in reverse when it wakes. "
+                  "Because the lid only reports closing when it's nearly shut, you'll mostly "
+                  "see the unfold; Preview shows the whole thing, and `toby sleep` plays it "
+                  "in full before suspending. Window animations change only the running "
+                  "Hyprland and never your config.")
+        note.set_xalign(0)
+        note.set_line_wrap(True)
+        note.get_style_context().add_class("apple-agent-dashboard-title")
+        page.pack_start(note, False, False, 4)
+
+    def _reset_animation_controls(self):
+        for key, switch in self.animation_switches.items():
+            switch.set_active(bool(toby_anim.ANIMATION_DEFAULTS[key]))
+        for key, scale in self.animation_sliders.items():
+            scale.set_value(toby_anim.ANIMATION_DEFAULTS[key])
+
+    def _collect_animation_settings(self):
+        values = {}
+        for key, switch in self.animation_switches.items():
+            values[key] = switch.get_active()
+        for key, scale in self.animation_sliders.items():
+            values[key] = round(float(scale.get_value()), 3)
+        # opening takes a little longer than closing, as it did by default
+        values["fold_open_duration"] = round(values["fold_close_duration"] * 1.16, 3)
+        return values
+
+    def _apply_animation_settings(self, before):
+        """Push saved animation settings to everything that uses them."""
+        after = toby_anim.animation_settings(SETTINGS)
+        self.face.reload_animation_settings()
+        self.chibi_director.reload(after)
+        # the fold daemon re-reads settings on SIGHUP
+        subprocess.Popen(["pkill", "-HUP", "-f", "toby_fold.py"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if after["hypr_animations_enabled"] != before["hypr_animations_enabled"] or (
+                after["hypr_animations_enabled"]
+                and after["hypr_animation_speed"] != before["hypr_animation_speed"]):
+            def worker():
+                if after["hypr_animations_enabled"]:
+                    hypr_animations.apply(after["hypr_animation_speed"])
+                else:
+                    hypr_animations.restore()
+            threading.Thread(target=worker, daemon=True).start()
+
+    def _preview_fold(self):
+        found = subprocess.run(["pkill", "-USR2", "-f", "toby_fold.py"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
+        if not found:
+            self.settings_save_status.set_text("The fold animation isn't running — start it with: toby start")
 
     def apply_accent_color(self, hex_color):
         """Rebuild the whole stylesheet around a new accent colour.
@@ -3997,7 +5165,7 @@ class AssistantWindow(Gtk.Window):
         self.topic_detail.open_topic(topic)
 
     def on_topic_quiz_requested(self, subject, topic_name):
-        self.topic_detail.set_visible(False)
+        self.topic_detail.close_topic()
         self.study_helper.set_status(f"Building a quiz on {topic_name}…")
 
         def worker():
@@ -4265,19 +5433,14 @@ class AssistantWindow(Gtk.Window):
         if self._pinch_cursor_armed:
             return
         if not screen_control.enabled:
-            if self._action_confirm_pending:
-                # Something else is already waiting on the Yes/No row, and a
-                # background thread is blocked until it is answered. Don't
-                # replace that question with this one.
-                self.camera_overlay.set_visible(True)
-                self.camera_overlay.set_recording(
-                    "Answer the pending confirmation first, then turn hand pointing on again")
-                return
             # Same one-time confirmation any other pointer action needs. It
-            # has to be answered before a hand can move the real cursor.
-            self.confirm_label.set_text("Let Toby move the cursor with your hand?")
-            self._pending_confirm_purpose = "pinch_cursor"
-            self._show_confirm_dialog()
+            # has to be answered, here at the computer, before a hand can
+            # move the real cursor.
+            def ask():
+                allowed = self.approvals.ask("Let Toby move the cursor with your hand?", kind="control",
+                                             local_only=True, details=["Camera Mode's hand pointing."])
+                GLib.idle_add(self._after_pinch_answer, allowed)
+            threading.Thread(target=ask, daemon=True).start()
             return
         self._pinch_cursor_armed = True
         self._pointer_smoothed = None
@@ -4467,6 +5630,8 @@ class AssistantWindow(Gtk.Window):
         if not text:
             return
         self.entry.set_text("")
+        self._busy = True
+        self._remote_reply = ""
         self.face.set_state(State.THINKING)
         self.answer.set_text("")
         self.task_cancelled = False
@@ -4474,6 +5639,15 @@ class AssistantWindow(Gtk.Window):
         smart_tag = "[Smart] " if will_use_cloud else ""
         self.task_label_text = smart_tag + (text if len(text) <= 60 else text[:57] + "…")
         self.task_steps = [("Thinking", "current")]
+        self.task_step_details = {}
+        self._worker_steps = 1
+        self._thinking_step = 0
+        self._resume_event.set()
+        self._task_origin = self._next_origin or "computer"
+        self._next_origin = None
+        self.current_task_id = self._next_task_id or TASKS.start(text, self._task_origin)
+        self._next_task_id = None
+        computer_tools.touched(reset=True)
         self._voice_spoken_len = 0
         if self.island_expanded.get_visible():
             self.island_expanded.set_task(self.task_label_text, self.task_steps)
@@ -4489,6 +5663,8 @@ class AssistantWindow(Gtk.Window):
         self._start_thinking_dots()
         GLib.timeout_add(1200, lambda: self._maybe_show_thinking_island(my_request_id))
 
+        self._publish_remote_state(force=True)
+
         # Run on a background thread — process()/think() do blocking network
         # I/O, and running that on the GTK main thread would freeze the whole
         # UI (including the close button) for the duration of the request.
@@ -4496,18 +5672,24 @@ class AssistantWindow(Gtk.Window):
         threading.Thread(target=self.process, args=(text, force_cloud), daemon=True).start()
 
     def _start_thinking_dots(self):
-        self._dot_frame = 0
+        """While waiting for the first words, "Thinking" breathes gently.
 
-        def cycle():
+        It replaces a row of cycling dots, which is a loading spinner in
+        text form. The face's drifting motes already say Toby is working;
+        this just makes the answer line feel alive rather than stuck.
+        """
+        self.answer.set_text("Thinking")
+        self.answer.set_visible(True)
+        self.answer.show()
+
+        def breathe(toward):
             if not self._waiting_for_first_chunk:
-                return False
-            self._dot_frame = (self._dot_frame + 1) % 4
-            self.answer.set_text("Thinking" + "." * self._dot_frame)
-            self.answer.set_visible(True)
-            self.answer.show()
-            return True
+                MOTION.animate("answer/opacity", 1.0, self.answer.set_opacity, "quick", "standard")
+                return
+            MOTION.animate("answer/opacity", toward, self.answer.set_opacity, 0.9, "move",
+                           on_done=lambda: breathe(1.0 if toward < 1.0 else 0.45))
 
-        GLib.timeout_add(400, cycle)
+        breathe(0.45)
 
     def _maybe_show_thinking_island(self, request_id):
         if request_id == self._request_id and self._waiting_for_first_chunk:
@@ -4541,6 +5723,17 @@ class AssistantWindow(Gtk.Window):
         has_key = bool(SETTINGS.get("cloud_api_key", "").strip())
         use_cloud = (self.smart_mode_active or force_cloud) and has_key
         think_fn = think_cloud if use_cloud else think
+
+        # Obvious one-step requests skip the model entirely (fast_path.py).
+        quick = (fast_path.match(text, ALLOWED_APPS)
+                 if SETTINGS.get("fast_path_enabled", True) and not use_cloud else None)
+        if quick is not None:
+            if self.voice.enabled:
+                self.voice.speak(quick["reply"])
+                self._voice_spoken_len = len(quick["reply"])
+            actions_succeeded = self._execute_actions(quick["actions"])
+            GLib.idle_add(self.finish_response, text, quick, actions_succeeded)
+            return False
         if use_cloud:
             GLib.idle_add(self.island.show_island, "Asking the cloud AI…")
 
@@ -4580,63 +5773,448 @@ class AssistantWindow(Gtk.Window):
         # them (mouse/keyboard via ydotool, subprocess calls in general) can
         # block or hang (e.g. if ydotoold isn't running), and this must never
         # be allowed to freeze the GTK main thread. When an action needs
-        # confirmation, we idle_add the dialog onto the main thread and then
-        # wait on an Event here — that blocks only this background thread,
-        # not the UI, while the user decides.
-        actions_succeeded = self._execute_actions(result.get("actions", []))
+        # confirmation, the question goes up on the computer and the phones
+        # and this thread waits for the answer — not the UI.
+        results = []
+        actions_succeeded = self._execute_actions(result.get("actions", []), results)
+
+        # Looking tools (status, files, programs, commands) return what they
+        # found; the model gets another turn to answer from real results
+        # rather than from what it guessed before looking.
+        rounds = 1
+        limit = MAX_WORK_MODE_ROUNDS if SETTINGS.get("work_mode") else MAX_TOOL_ROUNDS
+        while (not self.task_cancelled and rounds < limit
+               and any(a.get("tool") in FOLLOW_UP_TOOLS for a, _out, _ok in results)):
+            rounds += 1
+            self._thinking_step = self._worker_steps
+            self._worker_steps += 1
+            GLib.idle_add(self._append_task_step, "Looking at the results", "current")
+            self._set_task_state("thinking")
+            try:
+                result = think_fn(self._follow_up_prompt(text, results), self.history,
+                                  on_chunk=on_chunk, cancel_check=cancel_check)
+            except Exception as e:
+                result = {"reply": f"Ollama error while reading the results: {e}", "actions": [],
+                          "mood": "concerned"}
+                break
+            if result.get("_cancelled"):
+                GLib.idle_add(self.finish_cancelled)
+                return False
+            results = []
+            actions_succeeded += self._execute_actions(result.get("actions", []), results)
         GLib.idle_add(self.finish_response, text, result, actions_succeeded)
         return False
 
-    def _execute_actions(self, actions):
+    def _execute_actions(self, actions, results=None):
+        """Run one round of actions on the task thread.
+
+        Every action is classified first (permissions.py): safe ones run, ones
+        that change something wait for a yes from the computer or a phone,
+        and restricted ones are refused unless allowed on the computer. What
+        each action returned goes into results as (action, text, ok), so the
+        model can be shown it. Returns how many actions succeeded.
+        """
+        results = results if results is not None else []
         actions_succeeded = 0
-        GLib.idle_add(self._set_task_step_status, 0, "done")  # "Thinking" step complete
+        GLib.idle_add(self._set_task_step_status, self._thinking_step, "done")
+        base = self._worker_steps
+        self._worker_steps += len(actions)
         GLib.idle_add(self._extend_task_steps, actions)
+        if not actions:
+            return 0
+
+        # In Work Mode, Toby's pen pointer does the work instead of the chibi.
+        if (self._chibi_enabled() and not SETTINGS.get("work_mode")
+                and any(a.get("tool") in PHYSICAL_TOOLS for a in actions)):
+            self._set_task_state("preparing")
+            GLib.idle_add(self._chibi_begin)
+            time.sleep(toby_anim.animation_settings(SETTINGS)["chibi_transform_duration"] * 0.8)
+        self._set_task_state("working")
+
+        def fail(index, action, message, stop=False):
+            GLib.idle_add(self._set_task_step_status, index, "error", message)
+            results.append((action, message, False))
+            return stop
 
         for i, action in enumerate(actions):
+            index = base + i
+            self._wait_if_paused()
             if self.task_cancelled:
-                GLib.idle_add(self._set_task_step_status, i + 1, "error")
+                GLib.idle_add(self._set_task_step_status, index, "error")
                 break
-            GLib.idle_add(self._set_task_step_status, i + 1, "current")
-            fn = DISPATCH.get(action.get("tool"))
+            GLib.idle_add(self._set_task_step_status, index, "current")
+            tool = action.get("tool")
+            fn = DISPATCH.get(tool)
             if not fn:
-                GLib.idle_add(self._set_task_step_status, i + 1, "error")
+                fail(index, action, f"There's no tool called {tool!r}.")
                 continue
-            try:
-                result_summary = fn(action)
-                note_recent_action(action.get("tool", "?"), str(result_summary)[:80])
-                actions_succeeded += 1
-                GLib.idle_add(self._set_task_step_status, i + 1, "done")
-                if action.get("tool") == "set_school_schedule":
-                    self.school_mode_config = school_mode.load_config()
-            except NeedsConfirmation:
-                self._confirm_event.clear()
-                self._action_confirm_pending = True
-                GLib.idle_add(self._show_confirm_dialog)
-                self._confirm_event.wait()  # blocks this background thread only, never the UI
-                if not self._confirm_result:
-                    GLib.idle_add(self._set_task_step_status, i + 1, "error")
+            decision = permissions.classify(action)
+            if not permissions.allowed_at_all(decision, SETTINGS):
+                fail(index, action, f"Refused: {decision.title}, because {decision.reason}. Restricted "
+                                    f"actions are turned off on this computer.")
+                continue
+            # Ask before Toby reaches for the mouse or keyboard, not after:
+            # the chibi shouldn't take hold of the pointer and then ask.
+            if tool in CONTROL_TOOLS:
+                if not screen_control.enabled and not self._await_confirmation():
+                    fail(index, action, "You didn't allow mouse and keyboard control.")
                     break
+            elif decision.level != permissions.SAFE and tool != "install_package":
+                if not self._await_confirmation(decision.title, kind="action", level=decision.level,
+                                                details=decision.details, reason=decision.reason, tool=tool):
+                    fail(index, action, "You said no, so Toby stopped here." if not self.task_cancelled
+                         else "Cancelled.")
+                    break
+            try:
+                self._chibi_choreograph(action)
+            except Exception as e:
+                print("CHIBI ERROR:", e, flush=True)   # never let the show stop the task
+            try:
                 try:
                     result_summary = fn(action)
-                    note_recent_action(action.get("tool", "?"), str(result_summary)[:80])
-                    actions_succeeded += 1
-                    GLib.idle_add(self._set_task_step_status, i + 1, "done")
-                except Exception as e:
-                    GLib.idle_add(self._set_task_step_status, i + 1, "error")
-                    print("ACTION ERROR:", e, flush=True)
+                except NeedsConfirmation:
+                    install = tool == "install_package"
+                    title = f"Install {action.get('package', 'a package')}?" if install else None
+                    if not self._await_confirmation(title, kind="install" if install else "control", tool=tool):
+                        fail(index, action, "You said no, so Toby stopped here.")
+                        break
+                    result_summary = fn(action)
+                text_out = str(result_summary)
+                note_recent_action(tool or "?", text_out[:80])
+                actions_succeeded += 1
+                results.append((action, text_out, True))
+                GLib.idle_add(self._set_task_step_status, index, "done", text_out.split("\n", 1)[0][:160])
+                if tool == "set_school_schedule":
+                    self.school_mode_config = school_mode.load_config()
             except Exception as e:
-                GLib.idle_add(self._set_task_step_status, i + 1, "error")
+                fail(index, action, f"That didn't work: {e}")
                 print("ACTION ERROR:", e, flush=True)
+            finally:
+                try:
+                    self._chibi_after(action)
+                except Exception as e:
+                    print("CHIBI ERROR:", e, flush=True)
 
         return actions_succeeded
 
-    def _extend_task_steps(self, actions):
-        self.task_steps += [(a.get("tool", "?"), "pending") for a in actions]
-        if self.island_expanded.get_visible():
-            self.island_expanded.set_task(self.task_label_text, self.task_steps)
+    def _await_confirmation(self, title=None, kind="control", level="confirm", details=(), reason="", tool=""):
+        """Ask on the computer and every paired phone, and wait for a yes.
+
+        Blocks this background thread only, never the UI. The chibi, if
+        it's out, stops and waits with the user rather than carrying on. A
+        cancelled task, or ten minutes with no answer, counts as no.
+        """
+        if kind == "control" and not details:
+            details = ["Toby will move the pointer, click and type for you until you turn it off."]
+        if self.chibi_director.visible:
+            GLib.idle_add(lambda: self.chibi_director.ask_permission() and False)
+        self._set_task_state("needs_permission")
+        if self._task_origin.startswith("phone"):
+            self._event("needs_permission", "Toby needs your OK", title or self.CONFIRM_TEXT)
+        allowed = self.approvals.ask(title or self.CONFIRM_TEXT, level=level, details=details, reason=reason,
+                                     tool=tool, origin=self._task_origin, kind=kind,
+                                     cancel_check=lambda: self.task_cancelled)
+        if allowed and kind == "control":
+            screen_control.grant()
+        if allowed and kind == "install":
+            install_guard.grant_once()
+        self._set_task_state("working")
+        return allowed
+
+    def _wait_if_paused(self):
+        if self._resume_event.is_set():
+            return
+        self._set_task_state("paused")
+        while not self._resume_event.wait(0.25):
+            if self.task_cancelled:
+                return
+        self._set_task_state("working")
+
+    def _set_task_state(self, state):
+        """Called from any thread; the task record is thread-safe."""
+        task_id = self.current_task_id
+        if task_id and TASKS.update(task_id, state=state):
+            GLib.idle_add(lambda: self._publish_remote_state(force=True) and False)
+
+    def _follow_up_prompt(self, text, results):
+        lines = []
+        for action, output, ok in results:
+            lines.append(f"- {describe_action(action)} [{'ok' if ok else 'did not work'}]: {output[:1500]}")
+        body = "\n".join(lines)[:6000]
+        return (f"{text}\n\n[WHAT YOUR ACTIONS RETURNED: real results from the computer]\n{body}\n\n"
+                "Now answer the user's request from these results in \"reply\", in plain words (no raw "
+                "dumps unless they asked for output). If more steps are genuinely needed, put them in "
+                "\"actions\"; never repeat an action that already worked.")
+
+    def _append_task_step(self, label, status):
+        self.task_steps.append((label, status))
+        self._sync_chibi_steps()
+        self._publish_remote_state()
         return False
 
+    def _extend_task_steps(self, actions):
+        self.task_steps += [(describe_action(a), "pending") for a in actions]
+        if self.island_expanded.get_visible():
+            self.island_expanded.set_task(self.task_label_text, self.task_steps)
+        self._sync_chibi_steps()
+        return False
+
+    # -- the chibi doing the task ----------------------------------------------
+    def _update_island_progress(self):
+        """While a multi-step task runs, the island shows where it's up to —
+        including when the panel is closed or the task came from the phone."""
+        steps = [st for st in self.task_steps if st[0] != "Thinking"]
+        if not steps or not self._busy:
+            self.island.set_progress(0, 0)
+            return
+        done = sum(1 for _l, status in steps if status == "done")
+        current = next((label for label, status in steps if status == "current"), "")
+        self.island.set_progress(done, len(steps), current)
+        if not self.get_visible() and not self.island.showing_card():
+            self.island.show_island(self.island.label.get_text())
+
+    def set_work_mode(self, on):
+        SETTINGS["work_mode"] = bool(on)
+        toby_settings.save(SETTINGS)
+        if not on:
+            self.work.close()
+        if getattr(self, "settings_work_mode_switch", None) is not None:
+            self.settings_work_mode_switch.set_active(bool(on))
+        self.island.show_island("Work Mode on" if on else "Work Mode off")
+        GLib.timeout_add_seconds(2, lambda: self.island.hide_island() or False)
+        self._publish_remote_state(force=True)
+        return False
+
+    # -- Work Mode ---------------------------------------------------------------------
+    def _pen_cursor(self, x, y, state, box=None):
+        """Move Toby's pen pointer (called from the task thread)."""
+        def show():
+            self.chibi_director.set_pen(x, y, state, box)
+            self.chibi_stage.start()
+            return False
+        GLib.idle_add(show)
+
+    def _install_work_tools(self):
+        w = self.work
+        DISPATCH.update({
+            "look_at_screen": lambda a: w.look(),
+            "click_on": lambda a: w.click_on(a.get("target"), a.get("button", "left"), bool(a.get("double")),
+                                             a.get("x"), a.get("y")),
+            "drag": lambda a: w.drag(a.get("from"), a.get("to")),
+            "scroll": lambda a: w.scroll(a.get("amount", 3), a.get("target")),
+            "draw": lambda a: w.draw(a.get("shape", "circle"), a.get("target"), a.get("to"),
+                                     a.get("x"), a.get("y")),
+            "write_by_hand": lambda a: w.write_by_hand(a.get("text", ""), a.get("target"), a.get("where", "below"),
+                                                       a.get("size", 22), a.get("x"), a.get("y")),
+        })
+
+    def _chibi_enabled(self):
+        return toby_anim.animation_settings(SETTINGS)["chibi_enabled"]
+
+    def _sync_chibi_steps(self):
+        """The chibi's checklist is the task list minus the 'Thinking' step."""
+        if self.chibi_director.visible:
+            steps = [s for s in self.task_steps if s[0] != "Thinking"]
+            self.chibi_director.set_steps(self._chibi_title(), steps)
+            self.chibi_stage.start()
+        return False
+
+    def _chibi_title(self):
+        title = self.task_label_text.replace("[Smart] ", "")
+        return title[:1].upper() + title[1:] if title else "Working on it"
+
+    def _face_screen_position(self):
+        """Where the face sits on screen, so the chibi pops out of it."""
+        screen = self.get_screen()
+        sw, sh = screen.get_width(), screen.get_height()
+        if not self.get_visible():
+            return sw / 2, sh - 40
+        try:
+            fx, fy = self.face.translate_coordinates(self, 0, 0) or (0, 0)
+            win_w = self.get_allocated_width()
+            win_h = self.get_allocated_height()
+            face = self.face.get_allocation()
+            x = (sw - win_w) / 2 + fx + face.width / 2
+            y = sh - 55 - win_h + fy + face.height
+            return x, y
+        except Exception:
+            return sw / 2, sh - 80
+
+    def _chibi_begin(self):
+        """The face leaves the pill and grows a body on the stage."""
+        if self.chibi_director.visible:
+            return False
+        x, y = self._face_screen_position()
+        steps = [s for s in self.task_steps if s[0] != "Thinking"]
+        settings = toby_anim.animation_settings(SETTINGS)
+        screen = self.get_screen()
+        self.chibi_director.reload(settings)
+        self.chibi_director.set_screen(screen.get_width(), screen.get_height())
+        self.chibi_director.emerge(x, y, self._chibi_title(), steps)
+        self.chibi_stage.start()
+        # While Toby carries the pointer, it moves at his walking pace.
+        screen_control.carry_speed = settings["chibi_walk_speed"] * 1.1
+        self.face.set_state(State.SLEEPING)   # the head has left the pill
+        return False
+
+    def _chibi_end(self, reply_text=""):
+        if not self.chibi_director.visible:
+            return False
+        if reply_text:
+            self.chibi_director.say(reply_text[:140])
+            GLib.timeout_add(1600, self._chibi_finish_now)
+        else:
+            self._chibi_finish_now()
+        return False
+
+    def _chibi_finish_now(self):
+        screen_control.carry_speed = None
+        self.chibi_director.finish()
+        # the face comes back into the pill as the chibi flies home
+        delay = int(toby_anim.animation_settings(SETTINGS)["chibi_transform_duration"] * 1000) + 700
+        GLib.timeout_add(delay, self._chibi_returned)
+        return False
+
+    def _chibi_returned(self):
+        screen_control.carry_speed = None
+        if self.get_visible():
+            self.face.set_state(State.IDLE)
+        self.face.pulse_happy()
+        return False
+
+    def _chibi_choreograph(self, action):
+        """Runs on the task thread before each step: walk there, get ready.
+
+        Every wait is bounded, so an animation that stalls or a chibi that
+        is turned off mid-task can only ever make a step start a moment
+        later — never stop it from running.
+        """
+        director = self.chibi_director
+        if not director.visible:
+            return
+        tool = action.get("tool")
+        screen = self.get_screen()
+        sw, sh = screen.get_width(), screen.get_height()
+
+        def on_main(fn, *args):
+            GLib.idle_add(lambda: fn(*args) and False)
+
+        def take_the_pointer(destination_x):
+            """Walk to wherever the pointer is and take hold of it."""
+            if director.holding:
+                return
+            screen_control.refresh_position()
+            here = screen_control.pointer_pixels() or (sw / 2, sh / 2)
+            arrived = threading.Event()
+            on_main(director.walk_to, here[0], here[1], arrived, director.side_for(destination_x))
+            arrived.wait(timeout=4.0)
+            on_main(director.hold, screen_control.pointer_pixels)
+            time.sleep(toby_anim.DURATIONS["instant"])   # the hand closes, then it moves
+
+        # the bubble always names the step being done right now
+        on_main(director.say, describe_action(action))
+
+        if tool == "move_mouse":
+            tx = max(0.0, min(1.0, float(action.get("x", 0.5)))) * sw
+            take_the_pointer(tx)
+            # the carry itself is the glide: the hand reads its plan each frame
+        elif tool == "click_mouse":
+            here = screen_control.pointer_pixels() or (sw / 2, sh / 2)
+            take_the_pointer(here[0])
+            on_main(director.click, action.get("button", "left"))
+            time.sleep(0.12)   # let the press land visibly before the click does
+        elif tool == "type_text":
+            on_main(director.begin_typing, str(action.get("text", "")))
+            time.sleep(toby_anim.DURATIONS["quick"])   # the keyboard comes out first
+        elif tool in ("key_press", "close_tab"):
+            keys = action.get("keys", "") if tool == "key_press" else "ctrl+w"
+            director_combo = threading.Event()
+
+            def start_combo():
+                director.press_combo(keys)
+                director_combo.seconds = director.combo_seconds()
+                director_combo.set()
+            on_main(start_combo)
+            if director_combo.wait(timeout=1.0):
+                # the real key press lands as the last keycap goes down
+                time.sleep(min(1.0, getattr(director_combo, "seconds", 0.2)))
+        elif tool in ("open_url", "open_app"):
+            # point to where the new window will appear
+            on_main(director.point_at, sw / 2, sh * 0.4, 0.6)
+            time.sleep(0.3)
+        else:
+            on_main(director.release)
+            on_main(director.perform, "think", 0.5)
+            time.sleep(0.15)
+
+    def _chibi_after(self, action):
+        """Runs on the task thread after each step, finished or not."""
+        director = self.chibi_director
+        if not director.visible:
+            return
+        if action.get("tool") in ("type_text", "key_press", "close_tab"):
+            GLib.idle_add(lambda: director.end_typing() and False)
+
+    def _after_pinch_answer(self, allowed):
+        if allowed:
+            screen_control.grant()
+            self._arm_pinch_cursor()
+        else:
+            self.settings_pinch_cursor_switch.set_active(False)
+            SETTINGS["camera_pinch_cursor"] = False
+            toby_settings.save(SETTINGS)
+            self._disarm_pinch_cursor("Hand pointing needs mouse control")
+        return False
+
+    CONFIRM_TEXT = "Let Toby use your mouse and keyboard?"
+
+    def _start_fingerprint_scan(self, attempt=1):
+        """If turned on and a reader is set up, let a fingerprint say yes."""
+        if not (SETTINGS.get("confirm_with_fingerprint") and self._fingerprint_ready):
+            self.fingerprint_glyph.set_visible(False)
+            return
+        self.fingerprint_glyph.set_visible(True)
+        self.fingerprint_glyph.set_state("scanning")
+        if attempt == 1:
+            self.confirm_label.set_text(self.confirm_label.get_text().rstrip("?")
+                                        + "? Touch the reader, or press Yes.")
+
+        def on_result(outcome):
+            GLib.idle_add(self._on_fingerprint_result, outcome, attempt)
+
+        self._fingerprint_scan = fingerprint.FingerprintScan(on_result).start()
+
+    def _on_fingerprint_result(self, outcome, attempt):
+        if not self.confirm_row.get_visible():
+            return False   # answered some other way already
+        if outcome == "match":
+            self.fingerprint_glyph.set_state("match")
+            GLib.timeout_add(250, lambda: self.on_confirm_yes() or False)
+        elif outcome == "no-match" and attempt < 3:
+            self.fingerprint_glyph.set_state("miss")
+            GLib.timeout_add(600, lambda: self._start_fingerprint_scan(attempt + 1) or False)
+        elif outcome != "cancelled":
+            # out of attempts, or the reader errored: the buttons still work
+            self.fingerprint_glyph.set_state("miss")
+        return False
+
+    def _cancel_fingerprint_scan(self):
+        scan = getattr(self, "_fingerprint_scan", None)
+        if scan is not None:
+            scan.cancel()
+            self._fingerprint_scan = None
+        self.fingerprint_glyph.set_visible(False)
+
+    def _check_fingerprint_reader(self):
+        """Find out once, off the GTK thread, whether a reader is usable."""
+        def worker():
+            ready = fingerprint.reader_available()
+            GLib.idle_add(lambda: setattr(self, "_fingerprint_ready", ready) or False)
+        threading.Thread(target=worker, daemon=True).start()
+
     def _show_confirm_dialog(self):
+        self._start_fingerprint_scan()
+        GLib.idle_add(lambda: self._publish_remote_state(force=True))
         self.island.hide_island()
         self.set_visible(True)
         self.present()
@@ -4653,8 +6231,33 @@ class AssistantWindow(Gtk.Window):
         self.input_shape_combine_region(None)
         return False
 
+    def _finish_task_record(self, reply, actions_succeeded=0, cancelled=False):
+        """Close the task's record: its steps, the files it touched, and how
+        it went — failed only if something went wrong and nothing worked."""
+        task_id = self.current_task_id
+        if not task_id:
+            return
+        steps = [{"label": label, "status": status, "detail": self.task_step_details.get(i, "")}
+                 for i, (label, status) in enumerate(self.task_steps) if label != "Thinking"]
+        TASKS.set_steps(task_id, steps)
+        for path, action in computer_tools.touched(reset=True):
+            TASKS.add_file(task_id, path, action)
+        errored = any(st["status"] == "error" for st in steps)
+        state = "cancelled" if cancelled else ("failed" if errored and not actions_succeeded else "completed")
+        task = TASKS.finish(task_id, state, reply)
+        if self._task_origin.startswith("phone") and task:
+            if state == "completed":
+                self._event("task_done", "Done: " + task["text"][:60], (reply or "")[:200])
+            elif state == "failed":
+                self._event("task_failed", "Couldn't finish: " + task["text"][:50], (reply or "")[:200])
+
     def finish_cancelled(self):
+        self._finish_task_record("Cancelled.", cancelled=True)
         self._set_task_step_status(self._current_step_index(), "error")
+        self._chibi_end()
+        self._busy = False
+        self._remote_reply = "Cancelled."
+        self._publish_remote_state(force=True)
         self.face.set_state(State.IDLE)
         self.answer.set_text("Cancelled.")
         self.answer.set_visible(True)
@@ -4665,6 +6268,11 @@ class AssistantWindow(Gtk.Window):
 
     def finish_response(self, text, result, actions_succeeded=0):
         self._waiting_for_first_chunk = False  # safety net in case no partial "reply" text ever streamed
+        self._chibi_end(result.get("reply", "") if not self.task_cancelled else "")
+        self._finish_task_record(result.get("reply", ""), actions_succeeded, cancelled=self.task_cancelled)
+        self._busy = False
+        self._remote_reply = result.get("reply", "") or ("Cancelled." if self.task_cancelled else "")
+        self._publish_remote_state(force=True)
 
         self.current_mood = result.get("mood", "neutral")
         self.face.set_state(State.RESPONDING)
@@ -4743,6 +6351,9 @@ class AssistantWindow(Gtk.Window):
         itself is right there now, with the four things anyone actually wants
         to do about it.
         """
+        if self._fullscreen:
+            self._deferred_card = (asked, reply_text)   # shown when fullscreen ends
+            return
         preview = " ".join(reply_text.split())
         if len(preview) > 220:
             preview = preview[:217] + "…"
@@ -4774,6 +6385,9 @@ class AssistantWindow(Gtk.Window):
 
     def update_streaming_answer(self, content):
         display = extract_partial_reply(content)
+        if display:
+            self._remote_reply = display
+            self._publish_remote_state()
         if display is None:
             try:
                 parsed = json.loads(content.strip().removeprefix("```json").removeprefix("```").removesuffix("```"))
@@ -4806,60 +6420,84 @@ class AssistantWindow(Gtk.Window):
 
     # -- confirm handlers -----------------------------------------------------
     def on_confirm_yes(self, *_a):
-        screen_control.grant()
-        install_guard.grant_once()
-        self.confirm_row.set_visible(False)
-        self.input_shape_combine_region(None)
-        purpose = self._pending_confirm_purpose
-        self._pending_confirm_purpose = None
-        self.confirm_label.set_text("Control screen enable?")
-        if purpose == "pinch_cursor" and not self._action_confirm_pending:
-            # This prompt came from the Camera Mode switch, not from an
-            # action waiting on a background thread, so nothing is blocked
-            # on the event — just carry on and arm it.
-            self._arm_pinch_cursor()
-            return
-        self._action_confirm_pending = False
-        self._confirm_result = True
-        self._confirm_event.set()
-        if purpose == "pinch_cursor":
-            self._arm_pinch_cursor()
+        self._answer_shown_approval(True)
 
     def on_confirm_no(self, *_a):
-        screen_control.deny()
-        self.confirm_row.set_visible(False)
-        self.input_shape_combine_region(None)
-        purpose = self._pending_confirm_purpose
-        self._pending_confirm_purpose = None
-        self.confirm_label.set_text("Control screen enable?")
-        if purpose == "pinch_cursor":
-            self.settings_pinch_cursor_switch.set_active(False)
-            SETTINGS["camera_pinch_cursor"] = False
-            toby_settings.save(SETTINGS)
-            self._disarm_pinch_cursor("Hand pointing needs mouse control")
-            if not self._action_confirm_pending:
-                return
-        self._action_confirm_pending = False
-        self._confirm_result = False
-        self._confirm_event.set()
+        self._answer_shown_approval(False)
+
+    def _answer_shown_approval(self, allow):
+        self._cancel_fingerprint_scan()
+        if self._shown_approval:
+            self.approvals.answer(self._shown_approval, allow, by="computer")
+        # the approval center's change callback hides the row or shows the next
+
+    def _on_approvals_changed(self):
+        """Show the oldest open question in the pill, or put the row away."""
+        pending = self.approvals.pending()
+        current = pending[0] if pending else None
+        if current is None:
+            if self._shown_approval is not None:
+                self._shown_approval = None
+                self._cancel_fingerprint_scan()
+                self.confirm_row.set_visible(False)
+                self.confirm_label.set_text(self.CONFIRM_TEXT)
+                self.confirm_label.set_tooltip_text(None)
+                self.input_shape_combine_region(None)
+        elif current["id"] != self._shown_approval:
+            self._shown_approval = current["id"]
+            text = current["title"]
+            if not text.endswith("?"):
+                text = f"Toby wants to: {text}. Allow?"
+            if current["level"] == permissions.RESTRICTED and current["reason"]:
+                text += f" (Careful: {current['reason']}.)"
+            self.confirm_label.set_text(text)
+            self.confirm_label.set_line_wrap(True)
+            self.confirm_label.set_max_width_chars(60)
+            details = [d for d in current["details"] if d]
+            self.confirm_label.set_tooltip_text("\n".join(details) or None)
+            self._show_confirm_dialog()
+        self._publish_remote_state(force=True)
+        return False
 
     # -- show/hide with wake sequence ---------------------------------------
     def toggle(self, *_args):
-        if self.get_visible():
+        if self.get_visible() and not self._hiding:
             self.hide_panel()
         else:
             self.show_panel()
 
+    def _fade_outer(self, gen, start, end, duration, curve, on_done=None):
+        """Fade the pill's contents. Opacity goes on the inner container, not
+        the window: GDK on Wayland ignores opacity on a toplevel, but a child
+        widget's opacity is composited by GTK itself and works everywhere.
+        A newer show or hide supersedes this one, so the two never fight, and
+        MOTION finishes it on the clock even if no frames arrive."""
+        def done():
+            if gen == self._panel_generation and on_done:
+                on_done()
+
+        MOTION.animate("pill/opacity", end, self.outer.set_opacity, duration, curve,
+                       start=start, on_done=done)
+
     def show_panel(self):
         self._panel_generation += 1
+        self._hiding = False
         gen = self._panel_generation
+        anim = toby_anim.animation_settings(SETTINGS)
+        if anim["appear_enabled"]:
+            self._fade_outer(gen, 0.0, 1.0, anim["appear_duration"], "enter")
+        else:
+            MOTION.jump("pill/opacity", 1.0, self.outer.set_opacity)
         self.ring.fire()
         self.outer.get_style_context().remove_class("apple-agent-panel")
         self.outer.get_style_context().add_class("apple-agent-panel-hidden")
 
-        start_margin = -300  # fully below the visible screen, slides up from here
         end_margin = 55
-        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, start_margin)
+        # Arriving from nowhere, rise from fully below the screen. Summoned
+        # again while still sinking away, turn around from right where it is.
+        start_margin = None if self.get_visible() else -300
+        if start_margin is not None:
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, start_margin)
 
         self.set_visible(True)
         self.present()
@@ -4868,20 +6506,10 @@ class AssistantWindow(Gtk.Window):
         self.face.set_state(State.WAKING)
         self.last_interaction = time.monotonic()
 
-        slide_state = {"i": 0}
-        slide_steps = 16  # fewer steps, same 16ms cadence -> a quick ~250ms snap instead of ~400ms
-
-        def slide_step():
-            if gen != self._panel_generation:
-                return False  # a hide (or another show) happened mid-animation — stop
-            slide_state["i"] += 1
-            t = min(1.0, slide_state["i"] / slide_steps)
-            eased = ease_out_back(t)  # slight overshoot for a snappy, springy feel
-            margin = int(start_margin + (end_margin - start_margin) * eased)
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, margin)
-            return t < 1.0
-
-        GLib.timeout_add(16, slide_step)
+        # Rise into place on the "enter" curve: quick, then a long soft
+        # settle. It used to overshoot and spring back, which read as a toy.
+        MOTION.animate("pill/margin", end_margin, _margin_setter(self, GtkLayerShell.Edge.BOTTOM),
+                       "emphasized", "enter", start=start_margin)
         GLib.timeout_add(220, lambda: self._reveal_box(gen))
         GLib.timeout_add(300, lambda: self._reveal_entry(gen))
 
@@ -4915,7 +6543,26 @@ class AssistantWindow(Gtk.Window):
 
     def hide_panel(self):
         self._panel_generation += 1  # invalidate any in-flight show animation immediately
+        gen = self._panel_generation
         GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.NONE)
+        anim = toby_anim.animation_settings(SETTINGS)
+        if anim["appear_enabled"] and self.get_visible():
+            self._hiding = True
+            # fade out while sinking a little, the reverse of arriving
+            self.face.set_state(State.SLEEPING)
+            duration = anim["disappear_duration"]
+            MOTION.animate("pill/margin", MOTION.value("pill/margin", 55) - 26,
+                           _margin_setter(self, GtkLayerShell.Edge.BOTTOM), duration, "exit")
+            self._fade_outer(gen, None, 0.0, duration,
+                             "exit", on_done=lambda: self._finish_hide(gen))
+            return
+        self._finish_hide(gen)
+
+    def _finish_hide(self, gen):
+        if gen != self._panel_generation:
+            return  # shown again while fading out; leave it be
+        self._hiding = False
+        MOTION.jump("pill/opacity", 1.0, self.outer.set_opacity)
         self.set_visible(False)
         self.entry.set_visible(False)
         self.close_btn.set_visible(False)

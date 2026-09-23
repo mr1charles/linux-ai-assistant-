@@ -149,6 +149,12 @@ def _open_image(path: Path):
 
 
 def render_tree() -> str:
+    try:
+        import matplotlib  # noqa: F401
+        import networkx  # noqa: F401
+    except ImportError:
+        return ("Exporting an image needs two optional packages: "
+                "sudo pacman -S python-matplotlib python-networkx")
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -201,6 +207,12 @@ def render_tree() -> str:
 
 
 def render_bubbles() -> str:
+    try:
+        import matplotlib  # noqa: F401
+        import networkx  # noqa: F401
+    except ImportError:
+        return ("Exporting an image needs two optional packages: "
+                "sudo pacman -S python-matplotlib python-networkx")
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -256,6 +268,7 @@ def render_bubbles() -> str:
 # ---------------------------------------------------------------------------
 
 LAYOUTS = ("force", "radial", "mindmap")
+_layout_cache = {}
 
 
 def _facts_by_category(facts):
@@ -280,23 +293,61 @@ def _normalize(positions):
             for k, (x, y) in positions.items()}
 
 
-def _force_layout(facts, edges):
+def _force_layout(facts, edges, iterations=None):
     """Springs: related facts pull together, everything else pushes apart.
 
     Good for seeing which parts of what Toby knows are densely connected,
     less good for finding one particular fact.
-    """
-    import networkx as nx
 
-    graph = nx.Graph()
-    for fact in facts:
-        graph.add_node(fact["id"])
-    graph.add_edges_from(edges)
-    if graph.number_of_nodes() <= 1:
-        return {n: (0.5, 0.5) for n in graph.nodes}
-    # A fixed seed, so the same facts always land in the same arrangement
-    # rather than being reshuffled every time the page is opened.
-    return nx.spring_layout(graph, k=0.9, seed=42)
+    A small Fruchterman-Reingold layout written out here rather than taken
+    from networkx: networkx drags scipy and pandas along with it on Arch —
+    hundreds of megabytes to install for one picture. Starting positions
+    come from a fixed seed, so the same facts always land in the same
+    arrangement instead of being reshuffled every time the page opens.
+    """
+    import random
+
+    ids = [f["id"] for f in facts]
+    n = len(ids)
+    if n <= 1:
+        return {i: (0.5, 0.5) for i in ids}
+    if iterations is None:
+        # the work grows with the square of the number of facts; fewer
+        # passes for a big graph keep it well under a second
+        iterations = max(25, min(120, int(4800 / n)))
+    rng = random.Random(42)
+    pos = {i: [rng.random(), rng.random()] for i in ids}
+    k = 0.9 * math.sqrt(1.0 / n)          # ideal distance between nodes
+    temperature = 0.1
+    for _ in range(iterations):
+        disp = {i: [0.0, 0.0] for i in ids}
+        for a in range(n):                  # everything repels
+            pa = pos[ids[a]]
+            for b in range(a + 1, n):
+                pb = pos[ids[b]]
+                dx, dy = pa[0] - pb[0], pa[1] - pb[1]
+                d = math.hypot(dx, dy) or 0.01
+                f = k * k / d
+                disp[ids[a]][0] += dx / d * f
+                disp[ids[a]][1] += dy / d * f
+                disp[ids[b]][0] -= dx / d * f
+                disp[ids[b]][1] -= dy / d * f
+        for u, v in edges:                  # related facts attract
+            dx, dy = pos[u][0] - pos[v][0], pos[u][1] - pos[v][1]
+            d = math.hypot(dx, dy) or 0.01
+            f = d * d / k
+            disp[u][0] -= dx / d * f
+            disp[u][1] -= dy / d * f
+            disp[v][0] += dx / d * f
+            disp[v][1] += dy / d * f
+        for i in ids:
+            dx, dy = disp[i]
+            d = math.hypot(dx, dy) or 0.01
+            step = min(d, temperature)
+            pos[i][0] += dx / d * step
+            pos[i][1] += dy / d * step
+        temperature *= 0.96
+    return {i: (p[0], p[1]) for i, p in pos.items()}
 
 
 def _radial_layout(facts):
@@ -365,14 +416,22 @@ def get_graph_data(layout: str = "force") -> dict:
 
     if layout not in LAYOUTS:
         layout = "force"
-    if layout == "radial":
-        positions = _radial_layout(facts)
-    elif layout == "mindmap":
-        positions = _mindmap_layout(facts)
-    else:
-        positions = _force_layout(facts, edges)
 
-    positions = _normalize(positions)
+    # Positions depend only on which facts exist and their categories, so
+    # a graph that hasn't changed is never laid out twice.
+    key = (layout, tuple((f["id"], f["category"]) for f in facts))
+    cached = _layout_cache.get(key)
+    if cached is None:
+        if layout == "radial":
+            cached = _radial_layout(facts)
+        elif layout == "mindmap":
+            cached = _mindmap_layout(facts)
+        else:
+            cached = _force_layout(facts, edges)
+        cached = _normalize(cached)
+        _layout_cache.clear()        # only the current graph is worth keeping
+        _layout_cache[key] = cached
+    positions = cached
     nodes = [{
         "id": f["id"],
         "label": f["text"],

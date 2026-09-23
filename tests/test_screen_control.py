@@ -20,7 +20,9 @@ sys.path.insert(0, os.path.join(
 import types  # noqa: E402
 gi = types.ModuleType("gi")
 repository = types.ModuleType("gi.repository")
-repository.GLib = types.SimpleNamespace(timeout_add=lambda *a, **k: None)
+pending_timers = []
+repository.GLib = types.SimpleNamespace(
+    timeout_add=lambda _ms, fn, *a: pending_timers.append(fn) or len(pending_timers))
 gi.repository = repository
 sys.modules.setdefault("gi", gi)
 sys.modules.setdefault("gi.repository", repository)
@@ -140,6 +142,69 @@ for name, call in [("click", lambda: control.click()),
 
 control.grant()
 check("granting consent opens the gate", control.enabled, True)
+
+# -- a glide, run the way the app runs it -------------------------------------
+# The task runner calls move() on a worker thread; the glide's frames run on
+# the main loop (here, this thread pumping the timers by hand).
+import threading  # noqa: E402
+import time  # noqa: E402
+
+pointer_log = []
+sc.move_pointer = lambda px, py, timeout=1.5: pointer_log.append((px, py)) or "ok"
+sc.read_cursor = lambda timeout=0.5: (100.0, 100.0)   # the user left it here
+sc.press_button = lambda button, timeout=2: pointer_log.append(("click", button)) or f"Clicked {button}"
+control.get_screen_size = lambda: (1000, 800)
+control.current_x_frac, control.current_y_frac = 0.9, 0.9   # a stale memory
+pending_timers.clear()
+plan_seen = []
+
+
+def pump_glide(until):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not until():
+        for fn in list(pending_timers):
+            if not fn():
+                pending_timers.remove(fn)
+        pos = control.pointer_pixels()
+        if pos is not None:
+            plan_seen.append(pos)
+        time.sleep(0.01)
+
+
+results = {}
+worker = threading.Thread(target=lambda: results.setdefault("move", control.move(0.5, 0.25)))
+worker.start()
+pump_glide(lambda: not worker.is_alive())
+worker.join(1)
+check("move() on the task thread waits until the pointer arrives",
+      results.get("move"), "Moved the mouse to (500, 200)")
+check("the glide started from where the pointer really was, not a stale memory",
+      pointer_log[0][0] < 200 and pointer_log[0][1] < 200, True)
+check("and it ends exactly on the target", pointer_log[-1], (500, 200))
+check("the tracked position is the target afterwards",
+      (round(control.current_x_frac, 3), round(control.current_y_frac, 3)), (0.5, 0.25))
+steps = [((b[0] - a[0]) ** 2 + (b[1] - a[1]) ** 2) ** 0.5 for a, b in zip(pointer_log, pointer_log[1:])]
+check("the pointer never jumps across the screen", max(steps) < 250, True)
+
+# a click that follows a move can't land while the pointer is on its way
+pointer_log.clear()
+control.carry_speed = 900.0   # the chibi is carrying it: a slower, walking-pace glide
+order = []
+worker = threading.Thread(target=lambda: (control.move(0.9, 0.9), order.append("moved")))
+clicker = threading.Thread(target=lambda: (time.sleep(0.05), order.append(control.click())))
+worker.start()
+clicker.start()
+pump_glide(lambda: not worker.is_alive() and not clicker.is_alive())
+check("the click happened", "Clicked left" in order, True)
+check("it waited for the glide, so it clicked at the destination",
+      pointer_log[-2:], [(900, 720), ("click", "left")])
+check("and no pointer move came after the click", pointer_log[-1], ("click", "left"))
+check("carrying glides take walking time, not the quick glide",
+      control.glide_seconds(900) > 0.9, True)
+control.carry_speed = None
+check("without the chibi, a glide stays quick", control.glide_seconds(900), 0.34)
+check("pointer_pixels reports the resting position when nothing moves",
+      control.pointer_pixels(), (900.0, 720.0))
 check("disable closes it again", control.disable(), "Screen control disabled.")
 check("and it is really closed", control.enabled, False)
 

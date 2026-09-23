@@ -58,6 +58,53 @@ echo "== screen control checks =="
 echo "== memory graph layout checks =="
 "$PY" tests/test_knowledge_graph.py || status=1
 
+echo "== phone bridge checks =="
+timeout 90 "$PY" tests/test_remote_bridge.py || status=1
+
+echo "== permission levels =="
+"$PY" tests/test_permissions.py || status=1
+
+echo "== approvals, jobs, tasks and computer tools =="
+timeout 120 "$PY" tests/test_remote_tasks.py || status=1
+
+echo "== screen view and notifications =="
+"$PY" tests/test_screen_notify.py || status=1
+
+echo "== work mode: strokes, pens, seeing the screen =="
+timeout 300 "$PY" tests/test_work_mode.py || status=1
+
+echo "== work mode: reading controls through accessibility =="
+if command -v dbus-run-session >/dev/null && command -v xvfb-run >/dev/null; then
+  timeout 120 dbus-run-session -- xvfb-run -a "$PY" tests/test_accessibility.py 2>/dev/null || status=1
+else
+  echo "skipped: needs dbus-run-session and xvfb-run"
+fi
+
+echo "== phone app in a real browser =="
+timeout 180 "$PY" tests/browser_phone_app.py || status=1
+
+echo "== hyprland animation checks =="
+"$PY" tests/test_hypr_animations.py || status=1
+
+echo "== motion engine and tokens =="
+"$PY" tests/test_motion.py || status=1
+"$PY" tests/test_motion_tokens.py || status=1
+
+echo "== fast path checks =="
+"$PY" tests/test_fast_path.py || status=1
+
+echo "== model picker checks =="
+"$PY" tests/test_model_picker.py || status=1
+
+echo "== desktop event listener checks =="
+timeout 60 "$PY" tests/test_hypr_events.py || status=1
+
+echo "== lid fold state machine checks =="
+"$PY" tests/test_fold.py || status=1
+
+echo "== chibi motion and drawing checks =="
+"$PY" tests/test_chibi.py || status=1
+
 echo "== GTK CSS parse check =="
 if command -v xvfb-run >/dev/null 2>&1; then
     xvfb-run -a "$PY" tests/css_check.py || status=1
@@ -81,6 +128,29 @@ if command -v xvfb-run >/dev/null 2>&1; then
     rm -rf "$tmp_home"
 else
     echo "   skipped: xvfb-run not installed"
+fi
+
+echo "== fold overlay window =="
+if command -v xvfb-run >/dev/null 2>&1; then
+    xvfb-run -a "$PY" tests/smoke_fold_overlay.py || status=1
+else
+    echo "   skipped: xvfb-run not installed"
+fi
+
+echo "== a real task with the chibi =="
+if command -v xvfb-run >/dev/null 2>&1; then
+    tmp_home="$(make_home)"
+    HOME="$tmp_home" xvfb-run -a -s "-screen 0 1280x1024x24" "$PY" tests/smoke_chibi_task.py || status=1
+    rm -rf "$tmp_home"
+else
+    echo "   skipped: xvfb-run not installed"
+fi
+
+echo "== idle CPU use =="
+if command -v xvfb-run >/dev/null 2>&1; then
+    tmp_home="$(make_home)"
+    HOME="$tmp_home" xvfb-run -a "$PY" tests/perf_idle.py || status=1
+    rm -rf "$tmp_home"
 fi
 
 if [ "$status" -eq 0 ]; then
