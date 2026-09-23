@@ -38,3 +38,6 @@ ios/Payload/
 ios/*.ipa
 ios/*.zip
 ios/LittleToby.xcodeproj/
+
+# backups the installer makes when updating over changed files
+.before-update-*/

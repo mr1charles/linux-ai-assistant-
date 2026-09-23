@@ -384,6 +384,11 @@ def cmd_doctor(_args):
 
 def cmd_update(_args):
     if (REPO / ".git").exists():
+        changed = run(["git", "-C", str(REPO), "status", "--porcelain", "--untracked-files=no"], timeout=30)
+        if changed.stdout.strip():
+            # edits to Toby's own files would block the update; keep them, don't lose them
+            run(["git", "-C", str(REPO), "stash", "push", "-q", "-m", "local changes, saved by toby update"], timeout=30)
+            say(f"You had changed some of Toby's files. They're saved: git -C {REPO} stash list")
         out = run(["git", "-C", str(REPO), "pull", "--ff-only"], timeout=120)
         say(out.stdout.strip() or out.stderr.strip())
         if out.returncode:

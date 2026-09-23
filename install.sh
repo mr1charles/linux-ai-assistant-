@@ -57,6 +57,20 @@ if [ -z "$SELF_DIR" ] || [ ! -f "$SELF_DIR/scripts/toby_cli.py" ]; then
   step "Downloading Little Toby into $CODE_DIR"
   if [ -d "$CODE_DIR/.git" ]; then
     git -C "$CODE_DIR" fetch --depth 1 origin "$BRANCH"
+    # Changed or copied-in copies of Toby's own files would block the update.
+    # Keep them rather than lose them: edits go in a git stash, stray copies
+    # of files the new version brings go in a backup folder.
+    if [ -n "$(git -C "$CODE_DIR" status --porcelain --untracked-files=no)" ]; then
+      git -C "$CODE_DIR" stash push -q -m "local changes, saved by install.sh $(date +%F)"
+      warn "You had changed some of Toby's files. They're saved: git -C $CODE_DIR stash list"
+    fi
+    backup="$CODE_DIR/.before-update-$(date +%Y%m%d-%H%M%S)"
+    while IFS= read -r f; do
+      if [ -n "$f" ] && git -C "$CODE_DIR" cat-file -e "FETCH_HEAD:$f" 2>/dev/null; then
+        mkdir -p "$backup/$(dirname "$f")" && mv "$CODE_DIR/$f" "$backup/$f"
+      fi
+    done < <(git -C "$CODE_DIR" ls-files --others --exclude-standard)
+    [ -d "$backup" ] && warn "Moved stray copies of Toby's files out of the way, into $backup"
     git -C "$CODE_DIR" checkout -q -B "$BRANCH" FETCH_HEAD
   else
     mkdir -p "$(dirname "$CODE_DIR")"
