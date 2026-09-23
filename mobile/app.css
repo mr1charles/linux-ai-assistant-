@@ -19,6 +19,7 @@
   --curve-exit: cubic-bezier(0.55, 0.0, 0.8, 0.2);
   --curve-move: cubic-bezier(0.33, 1.0, 0.68, 1.0);
   --curve-standard: cubic-bezier(0.2, 0.0, 0.0, 1.0);
+  --curve-carry: cubic-bezier(0.45, 0.0, 0.55, 1.0);
   --dur-instant: 90ms;
   --dur-quick: 160ms;
   --dur-standard: 240ms;

@@ -24,7 +24,7 @@ practice that means:
 
 ## Tokens: one definition, four consumers
 
-`scripts/toby_anim.py` defines four curves and five durations. They are
+`scripts/toby_anim.py` defines five curves and five durations. They are
 used, unchanged, by the Python animations, the GTK stylesheet's
 transitions, Hyprland's window animations (`hypr_animations.py`) and the
 phone app's CSS custom properties. `tests/test_motion_tokens.py` fails if
@@ -36,6 +36,7 @@ any of them drift.
 | `exit` | something leaving | 0.55, 0.0, 0.8, 0.2 |
 | `move` | travelling between two resting places | 0.33, 1.0, 0.68, 1.0 |
 | `standard` | small state changes: hover, press, colour | 0.2, 0.0, 0.0, 1.0 |
+| `carry` | Toby carrying the pointer, like walking | 0.45, 0.0, 0.55, 1.0 |
 
 | Duration | Seconds | For |
 |---|---|---|
@@ -98,8 +99,14 @@ patterns this audit removed if they come back.
 | Study Helper | `open_helper/close_helper` | slides in from the right edge |
 | Quiz, flashcards, topic cards | `open_review`, `open_topic` | fade in; fade out when closed |
 | Hover, press, focus | stylesheet | `instant` on `standard` |
-| The chibi | `chibi.py` | emerges from the pill, grows a body, walks, reaches, types, cheers, flies home; the one place a small overshoot is allowed, as the body grows, because it's character animation |
-| Mouse glides Toby makes | `screen_control.move` | time-based on `move` |
+| The chibi | `chibi.py` | emerges from the pill, grows a body, walks, cheers, flies home; the one place a small overshoot is allowed, as the body grows, because it's character animation |
+| The chibi walking | `ChibiDirector.step` | speeds up over a fifth of a second, slows near the end; steps advance with distance so feet don't slide; leans into the walk on a spring |
+| Carrying the pointer | `ChibiDirector.hold`, `screen_control.move` | walk to the real pointer, grip its tail, then the body follows the glide's own plan each frame on `carry` |
+| Clicking | `ChibiDirector.click`, `draw_ripple` | the hand presses; a ring spreads from the tip on `enter` (two rings for a right-click) |
+| Typing | `begin_typing`, `draw_keyboard` | a small keyboard comes out on `quick`; each key lights under the hand typing it; the bubble fills in letter by letter |
+| Shortcuts | `press_combo`, `draw_keycaps` | keycaps appear and go down in order, 70 ms apart; the real press lands with the last |
+| Asking permission | `ask_permission` | lets go, hand to chin, looks back at the pill until you answer |
+| Mouse glides Toby makes | `screen_control.move` | time-based: `move` normally, `carry` at walking pace while the chibi holds it |
 | Lid close and open | `fold_effect.py`, `toby_fold.py` | compress, lean, fold to the hinge, black; the reverse on waking |
 | Shutdown | `toby_fold.py` | the desktop fades to black |
 | Login | `_startup_greeting` | the pill rises, says hello once per login, and tucks away |
@@ -135,6 +142,28 @@ curve:
 
 All of those now go through the tokens and the engine described above.
 
+The second pass, on the chibi working the mouse and keyboard, found these:
+
+- Toby walked to the target first, and only then did the pointer glide
+  there from wherever it was, so the cursor was never actually in his hand.
+  Now he walks to the pointer, takes hold, and carries it; his hand reads
+  the glide's own plan every frame, so the two can't drift apart.
+- His arm pointed toward the target but was too short to reach it. Arms
+  now bend at the elbow and end exactly on the point.
+- A glide returned at once, so a click straight after a move could land
+  partway there. The task runner now waits for the pointer to arrive, and
+  clicks, typing and key presses wait for any glide in progress.
+- Toby remembered where he last put the pointer. If you'd moved the mouse
+  since, the next glide jumped back to that old spot first. It now asks
+  Hyprland where the pointer really is.
+- He walked over and took hold of the pointer, then asked permission. He
+  now asks first.
+- Walk steps ran on a clock, so feet slid at high speed and shuffled on the
+  spot at low speed. Steps now follow distance.
+- The redrawn area around him was narrower than a long speech bubble,
+  which could leave bits of old bubble on screen.
+- Stopping him left the last speech bubble to reappear next time.
+
 ## Cost
 
 Measured on the development machine, in software rendering:
@@ -143,7 +172,7 @@ Measured on the development machine, in software rendering:
 |---|---|
 | Pill open and idle | about 4% of one CPU core (it was 18% before the shadow and frame-rate work) |
 | Pill hidden | under 1% |
-| The chibi on screen | about 2 ms a frame, only while it's out |
+| The chibi on screen | under 1 ms a frame walking or carrying, about 2 ms typing, only while it's out |
 | The lid fold | about 7 ms a frame at 1080p, for about 0.6 s closing and 0.7 s opening |
 | The wake ring | about 4 ms a frame, for 0.7 s |
 

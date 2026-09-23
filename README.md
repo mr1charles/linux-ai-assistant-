@@ -292,14 +292,28 @@ When a request involves the screen — opening something, moving the
 pointer, clicking, typing, closing a tab — Toby's face leaves the pill,
 grows a body, and does it in front of you:
 
-- It walks to each place it's going to act. The real pointer only moves once
-  Toby's hand is there, so the cursor is carried rather than drifting across
-  the screen on its own.
-- Typing gets a typing pose, clicks a little tap, opening something a reach.
+- If it hasn't been allowed to use your mouse and keyboard yet, it asks
+  first and waits, looking back at the pill. It doesn't take hold of anything
+  until you say yes.
+- To move the pointer, it walks over to wherever the pointer is (including
+  somewhere you left it yourself), takes hold of it, and carries it to the
+  target at walking pace. Its hand stays on the pointer the whole way, holding
+  the arrow by its tail so the tip stays visible.
+- A click is a press of that hand, with a ring spreading from the pointer's
+  tip. A right-click shows two rings. The click only happens once the
+  pointer has arrived, never on the way.
+- Typing brings out a small keyboard. Each key lights up under Toby's hands as
+  the letter is typed, and the speech bubble fills in with the text as it goes.
+- A shortcut like Ctrl+W appears as keycaps above its head, pressed in order,
+  and the real key press lands as the last one goes down.
+- Opening something is a gesture toward where the new window will appear.
 - A speech bubble names the step it's on, and a checklist in the corner
   shows the whole task: finished steps crossed out, the current one in bold,
   the rest waiting. The Dynamic Island shows the same progress —
   "2 of 4 · Click" with a filling ring — even with the panel closed.
+- It leans into its walk and settles upright when it stops, its steps keep
+  pace with the ground, and it glances up at the checklist when a step is
+  ticked off.
 - At the end it says the reply, cheers, folds its body away and flies back
   into the pill.
 
@@ -390,7 +404,7 @@ through one shared animation engine. Things arrive quickly and leave
 faster. If you change your mind halfway, say by summoning the pill while
 it's still sinking, it turns around from where it is instead of jumping.
 Hover and press feedback, Hyprland's window animations and the phone app
-all use the same four curves and five durations.
+all use the same small set of curves and durations.
 
 While a window is fullscreen (a video or a game), Toby holds back anything
 you didn't ask for: reply cards wait until you leave fullscreen, and the

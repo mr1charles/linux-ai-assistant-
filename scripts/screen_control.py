@@ -1,9 +1,16 @@
 """
 screen_control.py — mouse/keyboard automation with an explicit, code-enforced
 consent gate, and animated ("gliding") mouse movement instead of instant jumps.
+
+A glide publishes its plan (start, end, start time, length, curve), and
+pointer_pixels() answers "where is the pointer now" from it. The chibi's
+hand reads that every frame, which is what lets Toby visibly carry the
+pointer rather than walk beside a cursor that moves on its own.
 """
 
+import json
 import subprocess
+import threading
 import time
 
 from gi.repository import GLib
@@ -13,6 +20,7 @@ import toby_anim
 _VALID_BUTTONS = {"left", "right", "middle"}
 _GLIDE_SECONDS = 0.34   # toby_anim.DURATIONS["emphasized"]
 _GLIDE_INTERVAL_MS = 12
+_CARRY_LIMITS = (0.34, 1.4)   # shortest and longest carry, seconds
 
 # ---------------------------------------------------------------------------
 # ydotool syntax compatibility
@@ -154,6 +162,22 @@ def move_pointer(px, py, timeout=1.5):
     return _run_ydotool(["mousemove", "--absolute", str(px), str(py)], timeout)
 
 
+def read_cursor(timeout=0.5):
+    """Where the pointer really is, in pixels, or None if Hyprland can't say.
+
+    Wayland has no general way to ask, so Toby used to rely on remembering
+    where it last put the pointer. If you'd moved the mouse since, the next
+    glide started from that stale spot, and the pointer jumped there first.
+    """
+    try:
+        out = subprocess.run(["hyprctl", "-j", "cursorpos"], capture_output=True,
+                             text=True, timeout=timeout)
+        data = json.loads(out.stdout or "{}")
+        return float(data["x"]), float(data["y"])
+    except (FileNotFoundError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+        return None
+
+
 class NeedsConfirmation(Exception):
     pass
 
@@ -165,6 +189,14 @@ class ScreenControl:
         # Tracked internally since Wayland has no standard "get cursor pos" call.
         self.current_x_frac = 0.5
         self.current_y_frac = 0.5
+        # When the chibi is carrying the pointer, glides take as long as a
+        # walk that far would, on an accelerate-then-settle curve. None means
+        # the usual quick glide.
+        self.carry_speed = None
+        # The glide in progress: (start px, end px, start time, seconds, ease)
+        self._glide = None
+        self._glide_done = threading.Event()
+        self._glide_done.set()
 
     def grant(self):
         self.enabled = True
@@ -191,38 +223,95 @@ class ScreenControl:
         y_frac = max(0.0, min(1.0, float(y_frac)))
         return int(x_frac * w), int(y_frac * h)
 
+    def refresh_position(self):
+        """Pick up where the pointer really is, if Hyprland will tell us."""
+        if self.get_screen_size is None or not self._glide_done.is_set():
+            return
+        found = read_cursor()
+        if found is None:
+            return
+        w, h = self.get_screen_size()
+        if w and h:
+            self.current_x_frac = max(0.0, min(1.0, found[0] / w))
+            self.current_y_frac = max(0.0, min(1.0, found[1] / h))
+
+    def pointer_pixels(self, now=None):
+        """Where the pointer is right now, in pixels — mid-glide included.
+
+        The chibi's hand reads this every frame, so hand and pointer follow
+        the same plan instead of two animations that happen to look alike.
+        """
+        glide = self._glide
+        if glide is None:
+            if self.get_screen_size is None:
+                return None
+            w, h = self.get_screen_size()
+            return self.current_x_frac * w, self.current_y_frac * h
+        (sx, sy), (ex, ey), t0, seconds, ease = glide
+        t = min(1.0, ((now if now is not None else time.monotonic()) - t0) / seconds)
+        e = ease(t)
+        return sx + (ex - sx) * e, sy + (ey - sy) * e
+
+    def glide_seconds(self, distance_px):
+        if not self.carry_speed:
+            return _GLIDE_SECONDS
+        low, high = _CARRY_LIMITS
+        return max(low, min(high, distance_px / self.carry_speed))
+
+    def wait_for_glide(self, timeout=3.0):
+        """Block until the pointer has arrived. A no-op on the main thread,
+        where the glide itself runs and waiting would stop it."""
+        if threading.current_thread() is threading.main_thread():
+            return True
+        return self._glide_done.wait(timeout)
+
     def move(self, x_frac, y_frac):
         self._guard()
         x_frac = max(0.0, min(1.0, float(x_frac)))
         y_frac = max(0.0, min(1.0, float(y_frac)))
+        self.wait_for_glide()
+        if threading.current_thread() is not threading.main_thread():
+            self.refresh_position()
 
-        start_x, start_y = self.current_x_frac, self.current_y_frac
+        start = self._to_pixels(self.current_x_frac, self.current_y_frac)
+        end = self._to_pixels(x_frac, y_frac)
         end_x, end_y = x_frac, y_frac
+        seconds = self.glide_seconds(((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5)
+        ease = toby_anim.EASE["carry" if self.carry_speed else "move"]
         t0 = time.monotonic()
-        ease = toby_anim.EASE["move"]
+        self._glide = (start, end, t0, seconds, ease)
+        self._glide_done.clear()
+
+        def finish():
+            self.current_x_frac, self.current_y_frac = end_x, end_y
+            self._glide = None
+            self._glide_done.set()
+            return False  # stop the timeout
 
         def step():
-            # Time-based on the shared "move" curve: a busy machine makes the
-            # glide choppier, never slower. (It used to count 24 fixed steps.)
-            t = min(1.0, (time.monotonic() - t0) / _GLIDE_SECONDS)
-            eased = ease(t)
-            cur_x = start_x + (end_x - start_x) * eased
-            cur_y = start_y + (end_y - start_y) * eased
-            px, py = self._to_pixels(cur_x, cur_y)
+            # Time-based: a busy machine makes the glide choppier, never
+            # slower. (It used to count 24 fixed steps.)
+            now = time.monotonic()
+            px, py = self.pointer_pixels(now)
+            done = now - t0 >= seconds
+            if done:
+                px, py = end
             # A missing ydotoold makes every call hang until its timeout, which
             # would drag a glide out for many seconds. Give up on the whole
             # glide the first time a step doesn't land.
-            if move_pointer(px, py) != "ok":
-                self.current_x_frac, self.current_y_frac = end_x, end_y
-                return False
-            if t >= 1.0:
-                self.current_x_frac, self.current_y_frac = end_x, end_y
-                return False  # stop the timeout
+            if move_pointer(int(round(px)), int(round(py))) != "ok" or done:
+                return finish()
+            w, h = self.get_screen_size()
+            self.current_x_frac, self.current_y_frac = px / w, py / h
             return True  # keep going
 
         GLib.timeout_add(_GLIDE_INTERVAL_MS, step)
-        px, py = self._to_pixels(end_x, end_y)
-        return f"Gliding mouse to ({px}, {py})"
+        # Off the main thread (the task runner), don't report the step done
+        # until the pointer has arrived, so a click that follows can't land
+        # on the way there.
+        if self.wait_for_glide(seconds + 2.0):
+            return f"Moved the mouse to ({end[0]}, {end[1]})"
+        return f"Gliding mouse to ({end[0]}, {end[1]})"
 
     def move_immediate(self, x_frac, y_frac):
         """Jump the pointer straight to a position, with no glide.
@@ -243,10 +332,12 @@ class ScreenControl:
 
     def click(self, button="left"):
         self._guard()
+        self.wait_for_glide()
         return press_button(button)
 
     def type_text(self, text):
         self._guard()
+        self.wait_for_glide()
         outcome = _run_ydotool(["type", text], 5)
         if outcome == "timeout":
             return _YDOTOOL_TIMEOUT
@@ -258,4 +349,5 @@ class ScreenControl:
 
     def key(self, keys):
         self._guard()
+        self.wait_for_glide()
         return press_keys(keys)

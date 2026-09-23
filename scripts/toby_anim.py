@@ -86,11 +86,14 @@ def lerp(a, b, t):
 # any of them drift from these values, which is what keeps the pill, the
 # island, a window opening and the phone all moving as one system.
 #
-# Four curves, named for what they're for rather than their shape:
+# Five curves, named for what they're for rather than their shape:
 #   enter     something arriving: fast start, long soft settle, no overshoot
 #   exit      something leaving: gathers briefly, then goes quickly
 #   move      something travelling between two resting places
 #   standard  small state changes: hover, press, colour, a value updating
+#   carry     Toby carrying the pointer: speeds up and slows down evenly,
+#             like walking, peaking under twice its average speed (the
+#             others peak at three to six times, which reads as a lunge)
 # ---------------------------------------------------------------------------
 
 CURVES = {
@@ -98,6 +101,7 @@ CURVES = {
     "exit": (0.55, 0.0, 0.8, 0.2),
     "move": (0.33, 1.0, 0.68, 1.0),
     "standard": (0.2, 0.0, 0.0, 1.0),
+    "carry": (0.45, 0.0, 0.55, 1.0),
 }
 
 # Seconds. Short on purpose: an interface that makes you wait for it to

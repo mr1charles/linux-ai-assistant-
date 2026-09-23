@@ -552,6 +552,8 @@ def describe_action(action):
 # saving a note) there's nothing on screen to walk to.
 PHYSICAL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press", "open_url",
                   "open_app", "close_tab", "close_active_window", "send_discord_message"}
+# The ones that go through screen_control's consent gate.
+CONTROL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press"}
 
 
 def load_history():
@@ -5250,6 +5252,12 @@ class AssistantWindow(Gtk.Window):
             if not fn:
                 GLib.idle_add(self._set_task_step_status, i + 1, "error")
                 continue
+            # Ask before Toby reaches for the mouse or keyboard, not after:
+            # the chibi shouldn't take hold of the pointer and then ask.
+            if action.get("tool") in CONTROL_TOOLS and not screen_control.enabled:
+                if not self._await_confirmation():
+                    GLib.idle_add(self._set_task_step_status, i + 1, "error")
+                    break
             try:
                 self._chibi_choreograph(action)
             except Exception as e:
@@ -5262,11 +5270,7 @@ class AssistantWindow(Gtk.Window):
                 if action.get("tool") == "set_school_schedule":
                     self.school_mode_config = school_mode.load_config()
             except NeedsConfirmation:
-                self._confirm_event.clear()
-                self._action_confirm_pending = True
-                GLib.idle_add(self._show_confirm_dialog)
-                self._confirm_event.wait()  # blocks this background thread only, never the UI
-                if not self._confirm_result:
+                if not self._await_confirmation():
                     GLib.idle_add(self._set_task_step_status, i + 1, "error")
                     break
                 try:
@@ -5280,8 +5284,27 @@ class AssistantWindow(Gtk.Window):
             except Exception as e:
                 GLib.idle_add(self._set_task_step_status, i + 1, "error")
                 print("ACTION ERROR:", e, flush=True)
+            finally:
+                try:
+                    self._chibi_after(action)
+                except Exception as e:
+                    print("CHIBI ERROR:", e, flush=True)
 
         return actions_succeeded
+
+    def _await_confirmation(self):
+        """Show the "use your mouse and keyboard?" prompt and wait for it.
+
+        Blocks this background thread only, never the UI. The chibi, if
+        it's out, stops and waits with the user rather than carrying on.
+        """
+        self._confirm_event.clear()
+        self._action_confirm_pending = True
+        if self.chibi_director.visible:
+            GLib.idle_add(lambda: self.chibi_director.ask_permission() and False)
+        GLib.idle_add(self._show_confirm_dialog)
+        self._confirm_event.wait()
+        return self._confirm_result
 
     def _extend_task_steps(self, actions):
         self.task_steps += [(describe_action(a), "pending") for a in actions]
@@ -5342,9 +5365,14 @@ class AssistantWindow(Gtk.Window):
             return False
         x, y = self._face_screen_position()
         steps = [s for s in self.task_steps if s[0] != "Thinking"]
-        self.chibi_director.reload(toby_anim.animation_settings(SETTINGS))
+        settings = toby_anim.animation_settings(SETTINGS)
+        screen = self.get_screen()
+        self.chibi_director.reload(settings)
+        self.chibi_director.set_screen(screen.get_width(), screen.get_height())
         self.chibi_director.emerge(x, y, self._chibi_title(), steps)
         self.chibi_stage.start()
+        # While Toby carries the pointer, it moves at his walking pace.
+        screen_control.carry_speed = settings["chibi_walk_speed"] * 1.1
         self.face.set_state(State.SLEEPING)   # the head has left the pill
         return False
 
@@ -5359,6 +5387,7 @@ class AssistantWindow(Gtk.Window):
         return False
 
     def _chibi_finish_now(self):
+        screen_control.carry_speed = None
         self.chibi_director.finish()
         # the face comes back into the pill as the chibi flies home
         delay = int(toby_anim.animation_settings(SETTINGS)["chibi_transform_duration"] * 1000) + 700
@@ -5366,6 +5395,7 @@ class AssistantWindow(Gtk.Window):
         return False
 
     def _chibi_returned(self):
+        screen_control.carry_speed = None
         if self.get_visible():
             self.face.set_state(State.IDLE)
         self.face.pulse_happy()
@@ -5378,7 +5408,8 @@ class AssistantWindow(Gtk.Window):
         is turned off mid-task can only ever make a step start a moment
         later — never stop it from running.
         """
-        if not self.chibi_director.visible:
+        director = self.chibi_director
+        if not director.visible:
             return
         tool = action.get("tool")
         screen = self.get_screen()
@@ -5387,33 +5418,61 @@ class AssistantWindow(Gtk.Window):
         def on_main(fn, *args):
             GLib.idle_add(lambda: fn(*args) and False)
 
+        def take_the_pointer(destination_x):
+            """Walk to wherever the pointer is and take hold of it."""
+            if director.holding:
+                return
+            screen_control.refresh_position()
+            here = screen_control.pointer_pixels() or (sw / 2, sh / 2)
+            arrived = threading.Event()
+            on_main(director.walk_to, here[0], here[1], arrived, director.side_for(destination_x))
+            arrived.wait(timeout=4.0)
+            on_main(director.hold, screen_control.pointer_pixels)
+            time.sleep(toby_anim.DURATIONS["instant"])   # the hand closes, then it moves
+
         # the bubble always names the step being done right now
-        on_main(self.chibi_director.say, describe_action(action))
+        on_main(director.say, describe_action(action))
 
         if tool == "move_mouse":
-            tx = float(action.get("x", 0.5)) * sw
-            ty = float(action.get("y", 0.5)) * sh
-            arrived = threading.Event()
-            on_main(self.chibi_director.walk_to, tx, ty, arrived)
-            arrived.wait(timeout=4.0)
+            tx = max(0.0, min(1.0, float(action.get("x", 0.5)))) * sw
+            take_the_pointer(tx)
+            # the carry itself is the glide: the hand reads its plan each frame
         elif tool == "click_mouse":
-            tx = screen_control.current_x_frac * sw
-            ty = screen_control.current_y_frac * sh
-            arrived = threading.Event()
-            on_main(self.chibi_director.walk_to, tx, ty, arrived)
-            arrived.wait(timeout=4.0)
-            on_main(self.chibi_director.perform, "press", 0.4, "reach")
-            time.sleep(0.12)   # let the tap land visibly before the click does
-        elif tool in ("type_text", "key_press"):
-            length = len(str(action.get("text", action.get("keys", ""))))
-            on_main(self.chibi_director.perform, "type", min(3.0, 0.5 + length * 0.04))
-            time.sleep(0.25)
+            here = screen_control.pointer_pixels() or (sw / 2, sh / 2)
+            take_the_pointer(here[0])
+            on_main(director.click, action.get("button", "left"))
+            time.sleep(0.12)   # let the press land visibly before the click does
+        elif tool == "type_text":
+            on_main(director.begin_typing, str(action.get("text", "")))
+            time.sleep(toby_anim.DURATIONS["quick"])   # the keyboard comes out first
+        elif tool in ("key_press", "close_tab"):
+            keys = action.get("keys", "") if tool == "key_press" else "ctrl+w"
+            director_combo = threading.Event()
+
+            def start_combo():
+                director.press_combo(keys)
+                director_combo.seconds = director.combo_seconds()
+                director_combo.set()
+            on_main(start_combo)
+            if director_combo.wait(timeout=1.0):
+                # the real key press lands as the last keycap goes down
+                time.sleep(min(1.0, getattr(director_combo, "seconds", 0.2)))
         elif tool in ("open_url", "open_app"):
-            on_main(self.chibi_director.perform, "reach", 0.6)
+            # point to where the new window will appear
+            on_main(director.point_at, sw / 2, sh * 0.4, 0.6)
             time.sleep(0.3)
         else:
-            on_main(self.chibi_director.perform, "think", 0.5)
+            on_main(director.release)
+            on_main(director.perform, "think", 0.5)
             time.sleep(0.15)
+
+    def _chibi_after(self, action):
+        """Runs on the task thread after each step, finished or not."""
+        director = self.chibi_director
+        if not director.visible:
+            return
+        if action.get("tool") in ("type_text", "key_press", "close_tab"):
+            GLib.idle_add(lambda: director.end_typing() and False)
 
     CONFIRM_TEXT = "Let Toby use your mouse and keyboard?"
 
