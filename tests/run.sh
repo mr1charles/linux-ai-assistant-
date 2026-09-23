@@ -61,6 +61,15 @@ echo "== memory graph layout checks =="
 echo "== phone bridge checks =="
 timeout 90 "$PY" tests/test_remote_bridge.py || status=1
 
+echo "== permission levels =="
+"$PY" tests/test_permissions.py || status=1
+
+echo "== approvals, jobs, tasks and computer tools =="
+timeout 120 "$PY" tests/test_remote_tasks.py || status=1
+
+echo "== screen view and notifications =="
+"$PY" tests/test_screen_notify.py || status=1
+
 echo "== phone app in a real browser =="
 timeout 180 "$PY" tests/browser_phone_app.py || status=1
 

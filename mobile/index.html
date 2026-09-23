@@ -40,34 +40,42 @@
         <circle cx="83" cy="70" r="5" fill="#ff7359" opacity=".35"/>
         <path id="mouth" d="M49 76 Q60 84 71 76" fill="none" stroke="#261a0d" stroke-width="3.2" stroke-linecap="round"/>
       </svg>
-      <p id="reply" class="reply">Ask me anything, or tell me what to do on your laptop.</p>
+      <p id="reply" class="reply">Ask me anything, or tell me what to do on your computer.</p>
+    </section>
+
+    <section id="confirm" class="card confirm" hidden>
+      <p class="eyebrow">Toby wants to</p>
+      <p id="confirm-text">Use your mouse and keyboard</p>
+      <ul id="confirm-details"></ul>
+      <p id="confirm-reason" class="reason" hidden></p>
+      <div class="row">
+        <button id="confirm-no" class="secondary">Don't allow</button>
+        <button id="confirm-yes" class="primary">Allow</button>
+      </div>
     </section>
 
     <section id="task" class="card task" hidden>
       <div class="task-head">
         <h2 id="task-title">Working on it</h2>
-        <button id="cancel" class="link">Cancel</button>
+        <span id="task-state" class="state"></span>
       </div>
       <div class="progress"><div id="progress-bar"></div></div>
       <ol id="steps"></ol>
-    </section>
-
-    <section id="confirm" class="card confirm" hidden>
-      <p id="confirm-text">Let Toby use your mouse and keyboard?</p>
-      <div class="row">
-        <button id="confirm-no" class="secondary">No</button>
-        <button id="confirm-yes" class="primary">Yes</button>
+      <div class="row task-actions">
+        <button id="pause" class="secondary">Pause</button>
+        <button id="cancel" class="secondary">Stop</button>
       </div>
     </section>
 
     <section id="pair" class="card pair" hidden>
       <h2>Pair this phone</h2>
-      <p>On your laptop, run <code>toby phone pair</code> and scan the code it shows. That opens this app already paired.</p>
-      <p class="quiet">Or paste the pairing code here:</p>
+      <p>On your computer, open Toby's Settings and choose <b>Connect a phone</b> (or run <code>toby phone pair</code>), then scan the code with your camera.</p>
+      <p class="quiet">Or type the eight-character code it shows:</p>
       <div class="row">
-        <input id="pair-code" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Pairing code">
+        <input id="pair-code" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="K7M4-XQ2P" maxlength="12">
         <button id="pair-save" class="primary">Pair</button>
       </div>
+      <p id="pair-status" class="pair-status" hidden></p>
     </section>
 
     <form id="composer" class="composer">

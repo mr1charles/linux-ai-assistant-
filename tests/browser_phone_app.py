@@ -1,10 +1,12 @@
 """Drive the phone app in a real browser (headless Chromium via Playwright).
 
-Serves mobile/ from a real RemoteBridge, opens it at iPhone size with the
-pairing link, and checks what a person would see: the token is taken from
-the link and wiped from the address bar, the live checklist strikes through
-finished steps, the permission prompt appears and its buttons reach the
-laptop, and a sent message arrives. Screenshots are saved for looking at.
+Serves mobile/ from a real RemoteBridge, opens it at phone size with a
+pairing link, and checks what a person would see: the code is wiped from the
+address bar, the phone shows the same comparison number as the computer and
+gets a working token once the computer approves; the live checklist strikes
+through finished steps; permission prompts say what and why, and their
+buttons reach the computer; a revoked phone goes back to pairing.
+Screenshots are saved for looking at.
 
 Needs the playwright Python package and a Chromium; skipped otherwise.
 """
@@ -29,35 +31,37 @@ failures = []
 out_dir = Path(os.environ.get("PHONE_SHOTS", tempfile.mkdtemp()))
 
 
-class CB:
+class Services:
     def __init__(self):
-        self.asked, self.confirmed = [], []
+        self.asked, self.approved, self.controls = [], [], []
 
-    def ask(self, text):
+    def ask(self, text, device):
         self.asked.append(text)
-        return True, "Sent."
+        return True, "Sent.", "t1"
 
-    def confirm(self, answer):
-        self.confirmed.append(answer)
+    def approve(self, approval_id, allow, device):
+        self.approved.append((approval_id, allow))
         return True
 
-    def cancel(self):
-        return True
+    def task_control(self, action, device):
+        self.controls.append(action)
+        return True, "ok"
 
 
-cb = CB()
-token = rb.reset_token(Path(tempfile.mkdtemp()) / "remote.json")
-bridge = rb.RemoteBridge(cb, token, port=0).start()
+cb = Services()
+store = rb.DeviceStore(Path(tempfile.mkdtemp()) / "remote.json")
+bridge = rb.RemoteBridge(cb, store, port=0, name="Jacob's Laptop").start()
 host, port = bridge.address
 url = f"http://{host}:{port}/"
+session = bridge.pairing.start(url)
 
+steps = [{"label": "Open www.khanacademy.org", "status": "done", "detail": "Opened https://www.khanacademy.org"},
+         {"label": "Move the pointer", "status": "done", "detail": ""},
+         {"label": "Click", "status": "current", "detail": ""},
+         {"label": 'Type "quadratics"', "status": "pending", "detail": ""}]
 busy_state = {
-    "busy": True, "task": "Search Khan Academy for quadratics", "reply": "",
-    "steps": [{"label": "Open www.khanacademy.org", "status": "done"},
-              {"label": "Move the pointer", "status": "done"},
-              {"label": "Click", "status": "current"},
-              {"label": 'Type "quadratics"', "status": "pending"}],
-    "confirm": None, "history": []}
+    "busy": True, "reply": "", "steps": steps, "approvals": [], "history": [],
+    "task": {"id": "t1", "text": "Search Khan Academy for quadratics", "state": "working", "steps": steps}}
 bridge.publish(busy_state)
 
 executable = None
@@ -71,38 +75,75 @@ with sync_playwright() as p:
                             is_mobile=True, has_touch=True)
     errors = []
     page.on("pageerror", lambda e: errors.append(str(e)))
-    page.goto(url + "#pair=" + token)
-    page.wait_for_selector("#steps li")
-    time.sleep(0.6)   # let the entrance animation finish before the screenshot
-
+    page.goto(url + "#pair=" + session["code"])
+    page.wait_for_selector("#pair-status .compare", timeout=15000)
     if "pair=" in page.url:
-        failures.append("the pairing token was left in the address bar")
-    if page.evaluate("localStorage.getItem('toby.pairing')") != token:
-        failures.append("the pairing token wasn't kept")
+        failures.append("the pairing code was left in the address bar")
+    claims = bridge.pairing.pending_claims()
+    shown = page.text_content("#pair-status .compare").replace(" ", "")
+    if not claims or claims[0]["compare"] != shown:
+        failures.append(f"the phone shows a different number from the computer: {shown} vs {claims}")
+    page.screenshot(path=str(out_dir / "phone_pairing.png"))
+    if claims:
+        bridge.pairing.decide(claims[0]["id"], True)
+    page.wait_for_selector("#steps li", timeout=25000)
+    time.sleep(0.6)   # let the entrance animation finish before the screenshot
+    saved = page.evaluate("localStorage.getItem('toby.pairing')")
+    if not saved or not store.authenticate(saved):
+        failures.append("the phone didn't keep a working token after approval")
+    if page.text_content("#task-state") != "Working":
+        failures.append(f"the task's state isn't shown: {page.text_content('#task-state')!r}")
     classes = page.eval_on_selector_all("#steps li", "els => els.map(e => e.className)")
     if classes != ["done", "done", "current", "pending"]:
         failures.append(f"step states rendered wrong: {classes}")
-    strike = page.eval_on_selector("#steps li.done", "e => getComputedStyle(e).textDecorationLine")
+    strike = page.eval_on_selector("#steps li.done .label", "e => getComputedStyle(e).textDecorationLine")
     if "line-through" not in strike:
         failures.append("finished steps aren't struck through")
-    pending_strike = page.eval_on_selector("#steps li.pending", "e => getComputedStyle(e).textDecorationLine")
+    pending_strike = page.eval_on_selector("#steps li.pending .label", "e => getComputedStyle(e).textDecorationLine")
     if "line-through" in pending_strike:
         failures.append("steps not yet done are struck through")
+    detail_strike = page.eval_on_selector("#steps li.done .detail", "e => getComputedStyle(e).textDecorationLine")
+    if "line-through" in detail_strike:
+        failures.append("a finished step's detail is struck through too")
     page.screenshot(path=str(out_dir / "phone_task.png"))
 
     # a permission prompt arrives, and the phone answers it
-    bridge.publish({**busy_state, "confirm": {"pending": True, "text": "Let Toby use your mouse and keyboard?"}})
+    approval = {"id": "a1", "kind": "action", "level": "confirm",
+                "title": "Delete 14 files from ~/Downloads/Old Projects",
+                "details": ["~/Downloads/Old Projects/f1.zip", "They go to the trash, so you can restore them."],
+                "reason": "deleting files", "created": 0, "expires": 0}
+    bridge.publish({**busy_state, "approvals": [approval],
+                    "task": {**busy_state["task"], "state": "needs_permission"}})
     page.wait_for_selector("#confirm:not([hidden])", timeout=25000)
     time.sleep(0.4)
+    if "Delete 14 files" not in page.text_content("#confirm-text"):
+        failures.append("the prompt doesn't say what Toby wants to do")
+    if page.eval_on_selector_all("#confirm-details li", "els => els.length") != 2:
+        failures.append("the prompt doesn't list the details")
+    if page.text_content("#task-state") != "Needs your OK":
+        failures.append("the task doesn't show that it needs permission")
     page.screenshot(path=str(out_dir / "phone_confirm.png"))
     page.click("#confirm-yes")
     time.sleep(0.4)
-    if cb.confirmed != [True]:
-        failures.append(f"tapping Yes didn't reach the laptop: {cb.confirmed}")
+    if cb.approved != [("a1", True)]:
+        failures.append(f"tapping Allow didn't reach the computer: {cb.approved}")
+    page.click("#pause")
+    time.sleep(0.3)
+    if cb.controls != ["pause"]:
+        failures.append(f"Pause didn't reach the computer: {cb.controls}")
+
+    # a restricted request is flagged as such
+    bridge.publish({**busy_state, "approvals": [{**approval, "id": "a2", "level": "restricted",
+                                                 "title": "Run: sudo pacman -Syu", "reason": "it runs as administrator (sudo)"}]})
+    page.wait_for_selector("#confirm.restricted", timeout=25000)
+    if "sudo" not in (page.text_content("#confirm-reason") or ""):
+        failures.append("a restricted request doesn't say why it's risky")
 
     # the reply arrives
-    bridge.publish({"busy": False, "task": "", "steps": busy_state["steps"][:2], "confirm": None,
-                    "reply": "Done. Khan Academy is searching for quadratics.", "history": []})
+    done_steps = [{**st, "status": "done"} for st in steps]
+    bridge.publish({"busy": False, "steps": done_steps, "approvals": [], "history": [],
+                    "reply": "Done. Khan Academy is searching for quadratics.",
+                    "task": {**busy_state["task"], "state": "completed", "steps": done_steps}})
     # (polled from here rather than with wait_for_function: the app's
     # Content Security Policy rightly refuses string-evaluated script)
     deadline = time.monotonic() + 25
@@ -112,17 +153,25 @@ with sync_playwright() as p:
         failures.append("the reply never showed on the phone")
     time.sleep(0.6)
     page.screenshot(path=str(out_dir / "phone_reply.png"))
-    if page.text_content("#task-title") != "Done":
-        failures.append(f"a finished task isn't marked done: {page.text_content('#task-title')!r}")
+    if page.text_content("#task-state") != "Done":
+        failures.append(f"a finished task isn't marked done: {page.text_content('#task-state')!r}")
     if page.is_visible("#cancel"):
-        failures.append("Cancel is still offered for a finished task")
+        failures.append("Stop is still offered for a finished task")
 
     # sending a message
     page.fill("#text", "plan out my week")
     page.click("#send")
     time.sleep(0.5)
     if cb.asked != ["plan out my week"]:
-        failures.append(f"sending didn't reach the laptop: {cb.asked}")
+        failures.append(f"sending didn't reach the computer: {cb.asked}")
+
+    # revoked on the computer, the phone goes back to the pairing card
+    store.reset()
+    page.fill("#text", "hello?")
+    page.click("#send")
+    page.wait_for_selector("#pair:not([hidden])", timeout=10000)
+    if page.evaluate("localStorage.getItem('toby.pairing')"):
+        failures.append("a revoked phone kept its token")
 
     # an unpaired phone sees the pairing card, not the app
     fresh = browser.new_page(viewport={"width": 390, "height": 844})

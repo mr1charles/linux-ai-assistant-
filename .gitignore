@@ -21,6 +21,10 @@ face_landmarker.task
 # Study plan data (generated at runtime, personal)
 study_plan.json
 
+# What you've asked Toby to do (task history, personal)
+tasks.json
+tasks.tmp
+
 # The phone pairing token — a live credential; never commit it
 remote.json
 remote.tmp

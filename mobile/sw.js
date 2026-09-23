@@ -1,6 +1,6 @@
 // Keeps the app shell available offline so it opens instantly; never caches
 // anything under /api, which is always live and always authenticated.
-const SHELL = "toby-shell-v1";
+const SHELL = "toby-shell-v2";
 const FILES = ["/", "/app.css", "/app.js", "/icon.svg", "/manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {

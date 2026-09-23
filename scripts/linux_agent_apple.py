@@ -30,6 +30,7 @@ import subprocess
 import threading
 import time
 import datetime
+import urllib.parse
 from datetime import datetime as dt
 from enum import Enum, auto
 from pathlib import Path
@@ -39,7 +40,8 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 gi.require_version("GtkLayerShell", "0.1")
-from gi.repository import Gdk, GLib, Gtk, GtkLayerShell  # noqa: E402
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, GtkLayerShell  # noqa: E402
 
 import cairo  # noqa: E402
 import requests  # noqa: E402
@@ -62,6 +64,13 @@ import hypr_animations
 import model_picker
 import remote_bridge
 import toby_anim
+import approvals
+import computer_tools
+import jobs
+import notify
+import permissions
+import screen_view
+import tasks
 
 SETTINGS = toby_settings.load()
 
@@ -130,6 +139,23 @@ inside actions, even for a single action. Each is one of:
   {{"tool": "enable_study_mode"}}
   {{"tool": "disable_study_mode"}}
   {{"tool": "set_school_schedule", "day": "monday", "start": "07:30", "end": "19:00"}}
+  {{"tool": "system_status"}}
+  {{"tool": "list_windows"}}
+  {{"tool": "focus_window", "match": "firefox"}}
+  {{"tool": "list_programs", "match": "steam"}}
+  {{"tool": "stop_program", "match": "steam"}}
+  {{"tool": "list_files", "path": "~/Downloads"}}
+  {{"tool": "search_files", "query": "invoice", "path": "~"}}
+  {{"tool": "read_file", "path": "~/project/README.md"}}
+  {{"tool": "write_file", "path": "~/notes/todo.txt", "content": "...", "append": false}}
+  {{"tool": "move_file", "from": "~/Downloads/a.pdf", "to": "~/Documents/"}}
+  {{"tool": "trash_files", "paths": ["~/Downloads/old.zip"]}}
+  {{"tool": "open_path", "path": "~/Documents/report.pdf"}}
+  {{"tool": "open_terminal", "cwd": "~/project", "command": "claude"}}
+  {{"tool": "run_command", "command": "npm test", "cwd": "~/project", "background": false}}
+  {{"tool": "job_status", "job": "latest"}}
+  {{"tool": "watch_job", "job": "latest", "on_fail": "notify"}}
+  {{"tool": "download_file", "url": "https://...", "to": "~/Downloads"}}
 
 "reply" is shown to the user. "mood" reflects how the reply should feel — pick whichever fits.
 
@@ -142,7 +168,25 @@ Rules:
   send_discord_message, close_active_window, close_tab, read_emails, move_mouse,
   click_mouse, type_text, key_press, disable_control, read_screen, install_package,
   show_knowledge_tree, show_knowledge_bubbles, add_study_note, enable_study_mode,
-  disable_study_mode, set_school_schedule.
+  disable_study_mode, set_school_schedule, system_status, list_windows, focus_window,
+  list_programs, stop_program, list_files, search_files, read_file, write_file,
+  move_file, trash_files, open_path, open_terminal, run_command, job_status,
+  watch_job, download_file.
+- Computer tools: paths start with ~ (the user's home). Looking tools (system_status,
+  list_windows, list_programs, list_files, search_files, read_file, job_status)
+  return what they found; you'll then get a second turn with the results to answer
+  from — so on the first turn, just call them with a short reply like "Checking."
+  Never guess a status, a file's contents or whether something is running: look.
+- "Is X still running?" -> list_programs with match X. "How's the build going?" ->
+  job_status. "Delete" means trash_files (it goes to the trash). Rename = move_file.
+- run_command runs in a shell in cwd. Use "background": true for anything long
+  (builds, servers, installs, downloads) and then tell the user you'll keep an eye
+  on it; add watch_job with "on_fail": "retry" if they ask to try again if it fails.
+- To "continue" earlier work, use the Recent tasks listed in the context below.
+  To work on a coding project interactively, open_terminal in the project folder
+  with the tool the user names (e.g. "claude" for Claude Code).
+- Changing, deleting, running and downloading all ask the user first; Toby shows
+  them what you're about to do. Never claim something happened until it has.
 - x and y for move_mouse are fractions of the screen from 0.0 to 1.0, never raw pixels.
 - read_screen: ONLY call this when the user's message explicitly references
   something currently visible on their screen — "read this", "what does this
@@ -361,6 +405,12 @@ def install_package(package_name):
 
 screen_control = ScreenControl()
 
+# Commands Toby runs (builds, tests, downloads) and what it has been asked to
+# do; both outlive a single request so the phone can ask about them later.
+JOBS = jobs.JobManager()
+TASKS = tasks.TaskLog()
+SCREEN = screen_view.ScreenViewer()
+
 
 # ---------------------------------------------------------------------------
 # Pointer driver — used by Camera Mode's pinch-to-point
@@ -501,7 +551,29 @@ DISPATCH = {
     "enable_study_mode": lambda a: study_mode_state.enable(),
     "disable_study_mode": lambda a: study_mode_state.disable(),
     "set_school_schedule": lambda a: school_mode.set_day_schedule(a["day"], a["start"], a["end"]),
+    "system_status": lambda a: computer_tools.describe_status(),
+    "list_windows": lambda a: computer_tools.describe_windows(),
+    "focus_window": lambda a: computer_tools.focus_window(str(a.get("match", ""))),
+    "list_programs": lambda a: computer_tools.describe_programs(str(a.get("match", ""))),
+    "stop_program": lambda a: computer_tools.stop_program(str(a.get("match", ""))),
+    "list_files": lambda a: computer_tools.list_files(a.get("path", "~")),
+    "search_files": lambda a: computer_tools.search_files(a.get("query", ""), a.get("path", "~")),
+    "read_file": lambda a: computer_tools.read_file(a.get("path", "")),
+    "write_file": lambda a: computer_tools.write_file(a.get("path", ""), a.get("content", ""),
+                                                      bool(a.get("append"))),
+    "move_file": lambda a: computer_tools.move_file(a.get("from", ""), a.get("to", "")),
+    "trash_files": lambda a: computer_tools.trash_files(a.get("paths") or [a.get("path", "")]),
+    "open_path": lambda a: computer_tools.open_path(a.get("path", "")),
+    "open_terminal": lambda a: computer_tools.open_terminal(a.get("cwd", "~"), str(a.get("command", ""))),
+    # run_command, download_file, job_status and watch_job need the running
+    # task and the job list, so the window adds them (see _install_job_tools)
 }
+
+# Tools whose results the model needs to see before it can answer: after they
+# run, Toby gets another turn with what they returned.
+FOLLOW_UP_TOOLS = {"system_status", "list_windows", "list_programs", "list_files", "search_files",
+                   "read_file", "run_command", "job_status"}
+MAX_TOOL_ROUNDS = 4
 
 
 def describe_action(action):
@@ -543,6 +615,27 @@ def describe_action(action):
         "disable_study_mode": "Turn off Study Mode",
         "set_school_schedule": f"Set {short(action.get('day', ''), 12).capitalize()}'s schedule",
         "disable_control": "Hand back the mouse and keyboard",
+        "system_status": "Check the computer",
+        "list_windows": "See what's open",
+        "focus_window": f"Switch to {short(action.get('match', 'a window'), 24)}",
+        "list_programs": (f"Check whether {short(action.get('match'), 24)} is running"
+                          if action.get("match") else "See what's running"),
+        "stop_program": f"Stop {short(action.get('match', 'a program'), 24)}",
+        "list_files": f"Look in {short(action.get('path', '~'), 28)}",
+        "search_files": f"Search for \"{short(action.get('query', ''), 22)}\"",
+        "read_file": f"Read {short(os.path.basename(str(action.get('path', ''))) or 'a file', 28)}",
+        "write_file": f"Write {short(os.path.basename(str(action.get('path', ''))) or 'a file', 28)}",
+        "move_file": f"Move {short(os.path.basename(str(action.get('from', ''))) or 'a file', 26)}",
+        "trash_files": (f"Delete {len(action.get('paths') or [1])} "
+                        f"file{'s' if len(action.get('paths') or [1]) != 1 else ''}"),
+        "open_path": f"Open {short(os.path.basename(str(action.get('path', '')).rstrip('/')) or 'it', 28)}",
+        "open_terminal": (f"Open a terminal for {short(action.get('command'), 20)}"
+                          if action.get("command") else "Open a terminal"),
+        "run_command": f"Run {short(action.get('command', ''), 28)}",
+        "job_status": "Check on the job",
+        "watch_job": "Keep an eye on the job",
+        "download_file": "Download " + short(os.path.basename(urllib.parse.urlparse(
+            str(action.get("url", ""))).path) or "the file", 26),
     }
     return labels.get(tool, tool.replace("_", " ").capitalize() or "Step")
 
@@ -551,7 +644,8 @@ def describe_action(action):
 # and does the work in view; for purely informational ones (checking email,
 # saving a note) there's nothing on screen to walk to.
 PHYSICAL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press", "open_url",
-                  "open_app", "close_tab", "close_active_window", "send_discord_message"}
+                  "open_app", "close_tab", "close_active_window", "send_discord_message",
+                  "open_terminal", "open_path", "focus_window"}
 # The ones that go through screen_control's consent gate.
 CONTROL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press"}
 
@@ -761,6 +855,15 @@ def _build_volatile_context():
     if recent_actions:
         recent_str = "; ".join(f"{a['tool']} ({a['summary']})" for a in recent_actions)
         context_lines.append(f"Actions taken earlier this session (most recent last): {recent_str}")
+    running = JOBS.running()
+    if running:
+        context_lines.append("Background jobs: " + "; ".join(
+            f"job {j.id}: {j.describe()}" for j in running[:4]))
+    recent = [t for t in TASKS.recent(4) if t["state"] in ("completed", "failed", "cancelled")][:3]
+    if recent:
+        context_lines.append("Recent tasks (newest first): " + "; ".join(
+            f"\"{t['text'][:80]}\" ({t['state']}{': ' + t['reply'][:80] if t['reply'] else ''})"
+            for t in recent))
     if context_lines:
         parts.append("Ambient context (for your awareness, not something the user necessarily "
                      "mentioned):\n" + "\n".join(context_lines))
@@ -3106,6 +3209,122 @@ class MemoryGraphView(Gtk.DrawingArea):
         return True
 
 
+class RemoteServices:
+    """What a paired phone can ask of Toby (see RemoteBridge for the API).
+
+    These run on the bridge's request threads. Reads come from thread-safe
+    sources (the task log, the job list, /proc); anything that touches the
+    interface is handed to the GTK thread with GLib.idle_add.
+    """
+
+    def __init__(self, window):
+        self.w = window
+
+    def ask(self, text, device):
+        w = self.w
+        if w._busy:
+            return False, "Toby is still working on the last thing. Try again in a moment.", None
+        w._busy = True
+        origin = f"phone:{device['name']}"
+        task_id = TASKS.start(text, origin)
+        GLib.idle_add(w._remote_ask, text, origin, task_id)
+        return True, "Sent.", task_id
+
+    def task_control(self, action, device):
+        w = self.w
+        if not w._busy:
+            return False, "Toby isn't working on anything right now."
+        task_id = w.current_task_id
+        if action == "pause":
+            if not w._resume_event.is_set():
+                return True, "Already paused."
+            w._resume_event.clear()
+            for job in JOBS.running():
+                if job.task_id == task_id:
+                    JOBS.pause(job.id)
+            w._set_task_state("paused")
+            GLib.idle_add(lambda: w.island.show_island("Paused from your phone") and False)
+            return True, "Paused."
+        if action == "resume":
+            for job in JOBS.all():
+                if job.task_id == task_id and job.state == jobs.PAUSED:
+                    JOBS.resume(job.id)
+            w._resume_event.set()
+            w._set_task_state("working")
+            return True, "Carrying on."
+        if action == "stop":
+            GLib.idle_add(lambda: w.on_task_cancel() or False)
+            return True, "Stopping."
+        return False, f"Unknown action {action!r}."
+
+    def approve(self, approval_id, allow, device):
+        return self.w.approvals.answer(approval_id, allow, by=device["name"], from_phone=True)
+
+    def status(self):
+        w = self.w
+        status = computer_tools.system_status()
+        task = TASKS.get(w.current_task_id) if w._busy and w.current_task_id else None
+        status["toby"] = {"busy": w._busy, "model": _active_model(), "power": w._power_state,
+                          "current_task": task["text"] if task else None,
+                          "work_mode": bool(SETTINGS.get("work_mode", False))}
+        status["policy"] = {"screen_view": bool(SETTINGS.get("remote_screen_view", False)),
+                            "restricted_actions": bool(SETTINGS.get("allow_restricted_actions", False))}
+        status["jobs_running"] = len(JOBS.running())
+        return status
+
+    def tasks(self):
+        return TASKS.recent(20)
+
+    def task(self, task_id):
+        task = TASKS.get(task_id)
+        if task is None:
+            return None
+        if task_id == self.w.current_task_id and self.w._busy:
+            task["steps"] = self.w._live_steps()
+        task["job_details"] = [j.summary() for j in (JOBS.get(jid) for jid in task.get("jobs", [])) if j]
+        return task
+
+    def jobs(self):
+        return [j.summary() for j in reversed(JOBS.all())]
+
+    def job(self, job_id, lines):
+        job = JOBS.get(job_id)
+        return None if job is None else dict(job.summary(), output=job.tail(lines))
+
+    def screen(self, view, max_width):
+        if not SETTINGS.get("remote_screen_view", False):
+            return None, "screen_view_off"
+        return SCREEN.capture(view, max_width)
+
+    def overview(self):
+        windows = computer_tools.list_windows()
+        screen = self.w.get_screen()
+        return {"windows": windows, "screen": {"width": screen.get_width(), "height": screen.get_height()},
+                "screen_view": bool(SETTINGS.get("remote_screen_view", False))}
+
+    def files(self):
+        w = self.w
+        if w._busy:
+            live = [{"path": p, "action": a} for p, a in computer_tools.touched()]
+            if live:
+                return live
+        last = TASKS.last_finished()
+        return last.get("files", []) if last else []
+
+    def focus_window(self, address, device):
+        if not re.fullmatch(r"0x[0-9a-fA-F]{1,16}", address or ""):
+            return False, "That isn't a window address."
+        message = computer_tools.focus_window(address=address)
+        return message.startswith("Switched"), message
+
+    def set_work_mode(self, on, device):
+        GLib.idle_add(lambda: self.w.set_work_mode(on) and False)
+        return True, "Work Mode is on." if on else "Work Mode is off."
+
+    def device_revoked(self, device):
+        GLib.idle_add(lambda: self.w._refresh_phone_settings() and False)
+
+
 class AssistantWindow(Gtk.Window):
     def __init__(self, ring: RingFlash):
         super().__init__()
@@ -3114,8 +3333,23 @@ class AssistantWindow(Gtk.Window):
         self.current_mood = "neutral"
         self.expanded = False
         self._panel_generation = 0
-        self._confirm_event = threading.Event()
-        self._confirm_result = False
+        # One queue of "Toby wants to do this. Allow?" questions, answered from
+        # the pill or a paired phone. The newest task's record, its origin, and
+        # how far through its steps the task thread has got.
+        self.approvals = approvals.ApprovalCenter(
+            on_change=lambda: GLib.idle_add(self._on_approvals_changed))
+        self._shown_approval = None
+        self.current_task_id = None
+        self._task_origin = "computer"
+        self._next_origin = None
+        self._next_task_id = None
+        self._worker_steps = 1
+        self._thinking_step = 0
+        self.task_step_details = {}
+        self._resume_event = threading.Event()
+        self._resume_event.set()
+        self._power_state = "awake"
+        self._install_job_tools()
 
         self._hiding = False
         self._fullscreen = False
@@ -3125,7 +3359,6 @@ class AssistantWindow(Gtk.Window):
         self.school_mode_config = school_mode.load_config()
         self.school_scheduled_active = False
         self._adaptive_check_running = False
-        self._action_confirm_pending = False
         self._today_count = 0
         self._today_count_at = 0.0
 
@@ -3694,6 +3927,7 @@ class AssistantWindow(Gtk.Window):
         settings_page.pack_start(camera_record_hint, False, False, 4)
 
         self._build_animation_settings(settings_page)
+        self._build_phone_settings(settings_page)
 
         fp_separator = Gtk.Label(label="Fingerprint")
         fp_separator.set_xalign(0)
@@ -3965,56 +4199,162 @@ class AssistantWindow(Gtk.Window):
         self.face.react(name, direction)
         return False
 
+    # -- jobs -------------------------------------------------------------------------
+    def _install_job_tools(self):
+        """The tools that need the running task and the job list."""
+        def run(a):
+            self._set_task_state("waiting")
+            try:
+                text, job = computer_tools.run_command(
+                    JOBS, str(a.get("command", "")), a.get("cwd", "~"), bool(a.get("background")),
+                    task_id=self.current_task_id, cancel_check=lambda: self.task_cancelled)
+            finally:
+                self._set_task_state("working")
+            if job is not None and self.current_task_id:
+                TASKS.add_job(self.current_task_id, job.id)
+            return text
+
+        def download(a):
+            text, job = computer_tools.download_file(JOBS, a.get("url", ""), a.get("to", "~/Downloads"),
+                                                     task_id=self.current_task_id)
+            if job is not None:
+                JOBS.watch(job.id)
+                if self.current_task_id:
+                    TASKS.add_job(self.current_task_id, job.id)
+            return text
+
+        def status(a):
+            job = JOBS.get(a.get("job", "latest"))
+            if job is None:
+                return "Toby isn't running any jobs right now."
+            tail = "\n".join(job.tail(12))
+            return f"{job.describe()}\nLatest output:\n{tail}" if tail else job.describe()
+
+        def watch(a):
+            job = JOBS.watch(a.get("job", "latest"), a.get("on_fail", "notify"))
+            if job is None:
+                return "There's no job to keep an eye on."
+            retry = " If it fails, Toby will try once more." if job.on_fail == "retry" else ""
+            return f"Watching '{job.name}': you'll get a notification when it finishes.{retry}"
+
+        DISPATCH.update({"run_command": run, "download_file": download, "job_status": status,
+                         "watch_job": watch})
+        JOBS.on_finish = lambda job: GLib.idle_add(self._on_job_finished, job)
+        JOBS.on_change = lambda: GLib.idle_add(lambda: self._publish_remote_state() and False)
+
+    def _on_job_finished(self, job):
+        task = TASKS.get(job.task_id) if job.task_id else None
+        from_phone = bool(task and str(task.get("origin", "")).startswith("phone"))
+        if job.watched or from_phone:
+            kind = "job_done" if job.state == jobs.SUCCEEDED else "job_failed"
+            if job.state != jobs.STOPPED:
+                self._event(kind, job.describe(), job.tail(1)[0][:200] if job.tail(1) else "")
+        if not self._busy and job.state in (jobs.SUCCEEDED, jobs.FAILED) and (job.watched or from_phone):
+            self.island.show_island(job.describe()[:60])
+            GLib.timeout_add_seconds(5, lambda: self.island.hide_island() or False)
+        self._publish_remote_state(force=True)
+        return False
+
+    def _event(self, kind, title, body=""):
+        """A notification for paired phones, if they want this kind."""
+        remote = getattr(self, "remote", None)
+        if remote is not None and notify.wanted(kind, SETTINGS):
+            remote.events.add(kind, title, body)
+
     # -- the phone app ---------------------------------------------------------------
     def _start_remote_bridge(self):
-        """Serve the phone app, if you've turned it on (`toby phone on`)."""
+        """Serve the phone apps, if you've turned it on (`toby phone on`)."""
         self.remote = None
         self._busy = False
         self._remote_reply = ""
         self._last_remote_publish = 0.0
+        self._viewing_shown = False
+        self._watch_power()
         if not SETTINGS.get("remote_enabled"):
             return
-        window = self
-
-        class Callbacks:
-            # These run on the bridge's request threads, so they only read
-            # simple flags and hand real work to the GTK thread.
-            def ask(self, text):
-                if window._busy:
-                    return False, "Toby is still working on the last thing. Try again in a moment."
-                window._busy = True
-                GLib.idle_add(window._remote_ask, text)
-                return True, "Sent."
-
-            def confirm(self, answer):
-                if not window.confirm_row.get_visible():
-                    return False
-                GLib.idle_add(lambda: (window.on_confirm_yes() if answer else window.on_confirm_no()) or False)
-                return True
-
-            def cancel(self):
-                if not window._busy:
-                    return False
-                GLib.idle_add(lambda: window.on_task_cancel() or False)
-                return True
-
         try:
-            token = remote_bridge.load_token()
+            store = remote_bridge.DeviceStore()
             self.remote = remote_bridge.RemoteBridge(
-                Callbacks(), token, host=SETTINGS.get("remote_bind", "127.0.0.1"),
-                port=int(SETTINGS.get("remote_port", 8765))).start()
+                RemoteServices(self), store, host=SETTINGS.get("remote_bind", "127.0.0.1"),
+                port=int(SETTINGS.get("remote_port", 8765)),
+                name=remote_bridge.computer_name(SETTINGS))
+            self.remote.pairing.on_claim = self._on_pairing_claim
+            ntfy = SETTINGS.get("notify_ntfy_url", "")
+            if ntfy:
+                self.remote.events.listeners.append(notify.NtfySender(ntfy, lambda: SETTINGS))
+            self.remote.start()
             self._publish_remote_state(force=True)
+            self._refresh_phone_settings()
+            GLib.timeout_add_seconds(1, self._check_screen_viewing)
         except OSError as e:
             print(f"PHONE BRIDGE: couldn't start ({e}); the phone app won't connect", flush=True)
             self.remote = None
 
-    def _remote_ask(self, text):
+    def _on_pairing_claim(self, claim):
+        """A phone presented a valid pairing code: ask here, and only here."""
+        def ask():
+            compare = f"{claim['compare'][:3]} {claim['compare'][3:]}"
+            allowed = self.approvals.ask(
+                f"Pair {claim['name']} with this computer?", kind="pairing", local_only=True,
+                details=[f"Only say yes if your phone shows {compare}.",
+                         "A paired phone can ask Toby to do anything you could ask here."])
+            if self.remote is not None:
+                self.remote.pairing.decide(claim["id"], allowed)
+                if allowed:
+                    self.remote.events.add("device", f"{claim['name']} is paired", "")
+            GLib.idle_add(lambda: self._refresh_phone_settings() and False)
+        threading.Thread(target=ask, daemon=True).start()
+
+    def _check_screen_viewing(self):
+        """While a phone is looking at the screen, say so on the computer."""
+        if self.remote is None:
+            return False
+        viewing = bool(SCREEN.viewing())
+        if viewing and not self._viewing_shown:
+            self._viewing_shown = True
+            self.island.show_island("Your phone is viewing this screen")
+        elif not viewing and self._viewing_shown:
+            self._viewing_shown = False
+            if not self._busy:
+                self.island.hide_island()
+        return True
+
+    def _watch_power(self):
+        """Tell phones before the computer sleeps, so they can say "asleep"
+        rather than "can't connect". logind announces it; the lid fold holds
+        sleep back long enough for this to go out."""
+        try:
+            bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+        except GLib.Error:
+            return
+        def on_signal(_conn, _sender, _path, _iface, name, params, _data=None):
+            going = bool(params.unpack()[0])
+            if name == "PrepareForSleep":
+                self._power_state = "sleeping" if going else "awake"
+                if going:
+                    self._event("power", "Your computer is going to sleep", "")
+            elif name == "PrepareForShutdown" and going:
+                self._power_state = "shutting_down"
+                self._event("power", "Your computer is shutting down", "")
+            self._publish_remote_state(force=True)
+        for signal_name in ("PrepareForSleep", "PrepareForShutdown"):
+            bus.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager", signal_name,
+                                 "/org/freedesktop/login1", None, Gio.DBusSignalFlags.NONE, on_signal)
+        self._system_bus = bus
+
+    def _remote_ask(self, text, origin="phone", task_id=None):
+        self._next_origin = origin
+        self._next_task_id = task_id
         self.entry.set_text(text)
         self.on_submit(self.entry)
         return False
 
+    def _live_steps(self):
+        return [{"label": label, "status": status, "detail": self.task_step_details.get(i, "")}
+                for i, (label, status) in enumerate(self.task_steps) if label != "Thinking"]
+
     def _publish_remote_state(self, force=False):
-        """Tell a connected phone what Toby is doing right now."""
+        """Tell connected phones what Toby is doing right now."""
         remote = getattr(self, "remote", None)
         if remote is None:
             return False
@@ -4022,19 +4362,32 @@ class AssistantWindow(Gtk.Window):
         if not force and now - self._last_remote_publish < 0.2:
             return False   # streaming text arrives fast; a few updates a second is plenty
         self._last_remote_publish = now
-        steps = [{"label": label, "status": status}
-                 for label, status in self.task_steps if label != "Thinking"]
-        history = [{"role": m["role"], "content": m["content"][:400]} for m in self.history[-6:]]
-        confirm = None
-        if self.confirm_row.get_visible():
-            confirm = {"pending": True, "text": self.confirm_label.get_text()}
+        steps = self._live_steps()
+        history = [{"role": m["role"], "content": m["content"][:400]} for m in self.history[-8:]]
+        record = TASKS.get(self.current_task_id) if self.current_task_id else None
+        task = None
+        if record is not None:
+            task = {k: record[k] for k in ("id", "text", "origin", "state", "created", "ended", "error")}
+            task["steps"] = steps if self._busy else record["steps"]
+            task["reply"] = self._remote_reply or record["reply"]
+        approvals_for_phone = [{k: a[k] for k in ("id", "kind", "level", "title", "details", "reason",
+                                                   "created", "expires")}
+                               for a in self.approvals.pending(for_phone=True)]
+        confirm = ({"pending": True, "text": approvals_for_phone[0]["title"]}
+                   if approvals_for_phone else None)
         remote.publish({
             "busy": self._busy,
-            "task": self._chibi_title() if self._busy or steps else "",
-            "steps": steps,
+            "task": task,
+            "steps": [{"label": st["label"], "status": st["status"]} for st in steps],
             "reply": self._remote_reply,
             "confirm": confirm,
+            "approvals": approvals_for_phone,
             "history": history,
+            "jobs": [j.summary() for j in list(reversed(JOBS.all()))[:8]],
+            "work_mode": bool(SETTINGS.get("work_mode", False)),
+            "power": self._power_state,
+            "screen_view": bool(SETTINGS.get("remote_screen_view", False)),
+            "viewing": bool(SCREEN.viewing()),
         })
         return False
 
@@ -4048,12 +4401,13 @@ class AssistantWindow(Gtk.Window):
         self.task_cancelled = True
         self._set_task_step_status(self._current_step_index(), "error")
         self.island.set_status("Cancelling…")
-        if not self._confirm_event.is_set():
-            # if a confirm dialog is mid-wait, treat Cancel as "No" so the
-            # background thread doesn't sit blocked waiting for an answer
-            self._confirm_result = False
-            self.confirm_row.set_visible(False)
-            self._confirm_event.set()
+        # A question the task is waiting on counts as "no" (the wait polls
+        # task_cancelled); a paused task is released so it can stop; and
+        # anything the task started running in the foreground is stopped.
+        self._resume_event.set()
+        for job in JOBS.running():
+            if job.task_id == self.current_task_id and not job.watched:
+                JOBS.stop(job.id)
 
     def _current_step_index(self):
         for i, (_label, status) in enumerate(self.task_steps):
@@ -4061,10 +4415,12 @@ class AssistantWindow(Gtk.Window):
                 return i
         return -1
 
-    def _set_task_step_status(self, index, status):
+    def _set_task_step_status(self, index, status, detail=None):
         if 0 <= index < len(self.task_steps):
             label, _old = self.task_steps[index]
             self.task_steps[index] = (label, status)
+            if detail is not None:
+                self.task_step_details[index] = detail
         if self.island_expanded.get_visible():
             self.island_expanded.set_task(self.task_label_text, self.task_steps)
         self._sync_chibi_steps()
@@ -4341,6 +4697,138 @@ class AssistantWindow(Gtk.Window):
         toby_settings.save(SETTINGS)
         self.settings_save_status.set_text("Saved.")
         GLib.timeout_add_seconds(3, lambda: self.settings_save_status.set_text("") or False)
+
+    # -- phone settings ------------------------------------------------------------
+    def _build_phone_settings(self, page):
+        """Connect a phone, see and revoke paired phones, and the two
+        switches that decide how much a phone may do."""
+        heading = Gtk.Label(label="Phone")
+        heading.set_xalign(0)
+        heading.get_style_context().add_class("apple-agent-section-heading")
+        page.pack_start(heading, False, False, 6)
+
+        self.phone_status = Gtk.Label(label="")
+        self.phone_status.set_xalign(0)
+        self.phone_status.set_line_wrap(True)
+        page.pack_start(self.phone_status, False, False, 0)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.phone_connect_btn = Gtk.Button(label="Connect a phone")
+        self.phone_connect_btn.connect("clicked", lambda *_: self._start_phone_pairing())
+        buttons.pack_start(self.phone_connect_btn, False, False, 0)
+        page.pack_start(buttons, False, False, 0)
+
+        self.phone_pair_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.phone_pair_box.set_no_show_all(True)
+        self.phone_qr = Gtk.Image()
+        self.phone_qr.set_halign(Gtk.Align.START)
+        self.phone_pair_box.pack_start(self.phone_qr, False, False, 0)
+        self.phone_pair_label = Gtk.Label(label="")
+        self.phone_pair_label.set_xalign(0)
+        self.phone_pair_label.set_line_wrap(True)
+        self.phone_pair_label.set_selectable(True)
+        self.phone_pair_box.pack_start(self.phone_pair_label, False, False, 0)
+        page.pack_start(self.phone_pair_box, False, False, 0)
+
+        self.phone_devices_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        page.pack_start(self.phone_devices_box, False, False, 0)
+
+        for key, label, hint in (
+                ("remote_screen_view", "Let paired phones see the screen",
+                 "Off by default. While a phone is looking, Toby says so here."),
+                ("allow_restricted_actions", "Allow restricted actions",
+                 "sudo, deleting folders, anything outside your home folder. Toby still asks each time.")):
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            text = Gtk.Label(label=label)
+            text.set_tooltip_text(hint)
+            row.pack_start(text, False, False, 0)
+            switch = Gtk.Switch()
+            switch.set_active(bool(SETTINGS.get(key, False)))
+            switch.set_tooltip_text(hint)
+
+            def changed(sw, _param, key=key):
+                SETTINGS[key] = sw.get_active()
+                toby_settings.save(SETTINGS)
+                self._publish_remote_state(force=True)
+            switch.connect("notify::active", changed)
+            row.pack_end(switch, False, False, 0)
+            page.pack_start(row, False, False, 0)
+        self._refresh_phone_settings()
+
+    def _refresh_phone_settings(self):
+        if not hasattr(self, "phone_status"):
+            return False
+        for child in self.phone_devices_box.get_children():
+            self.phone_devices_box.remove(child)
+        if not SETTINGS.get("remote_enabled"):
+            self.phone_status.set_text("The phone connection is off. Turn it on with `toby phone on` in a "
+                                       "terminal (it sets up Tailscale so your phone can reach Toby anywhere).")
+            self.phone_connect_btn.set_sensitive(False)
+            return False
+        self.phone_connect_btn.set_sensitive(getattr(self, "remote", None) is not None)
+        devices = remote_bridge.DeviceStore().devices()
+        self.phone_status.set_text(f"{len(devices)} phone{'s' if len(devices) != 1 else ''} paired."
+                                   if devices else "No phones paired yet.")
+        for device in devices:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            seen = (time.strftime("last used %d %b %H:%M", time.localtime(device["last_seen"]))
+                    if device.get("last_seen") else "not used yet")
+            label = Gtk.Label(label=f"{device['name']}  ·  {seen}")
+            label.set_xalign(0)
+            row.pack_start(label, True, True, 0)
+            revoke = Gtk.Button(label="Unpair")
+
+            def unpair(_b, device_id=device["id"]):
+                remote_bridge.DeviceStore().revoke(device_id)
+                self._refresh_phone_settings()
+            revoke.connect("clicked", unpair)
+            row.pack_end(revoke, False, False, 0)
+            self.phone_devices_box.pack_start(row, False, False, 0)
+        self.phone_devices_box.show_all()
+        return False
+
+    def _start_phone_pairing(self):
+        """Show a pairing QR code and code, from a fresh one-time session."""
+        if getattr(self, "remote", None) is None:
+            return
+        self.phone_pair_label.set_text("Starting…")
+        self.phone_pair_box.set_visible(True)
+        self.phone_pair_label.show()
+
+        def worker():
+            name = remote_bridge.tailscale_name()
+            base = f"https://{name}" if name else ""
+            session = self.remote.pairing.start(base)
+            png = None
+            if base:
+                try:
+                    out = subprocess.run(["qrencode", "-t", "PNG", "-s", "6", "-m", "2", "-o", "-",
+                                          session["url"]], capture_output=True, timeout=5)
+                    png = out.stdout if out.returncode == 0 else None
+                except (OSError, subprocess.TimeoutExpired):
+                    png = None
+            GLib.idle_add(self._show_phone_pairing, session, base, png)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_phone_pairing(self, session, base, png):
+        if png:
+            loader = GdkPixbuf.PixbufLoader.new_with_type("png")
+            loader.write(png)
+            loader.close()
+            self.phone_qr.set_from_pixbuf(loader.get_pixbuf())
+            self.phone_qr.show()
+        else:
+            self.phone_qr.hide()
+        if base:
+            text = (f"In Little Toby on your iPhone, tap Pair a computer and scan this, or type "
+                    f"{base} and the code {session['display_code']}. The code works once, for five "
+                    f"minutes. You'll be asked here before the phone is paired.")
+        else:
+            text = ("Tailscale isn't set up, so a phone can't reach this computer from elsewhere. Install "
+                    "it on this computer and your phone and run `sudo tailscale up`, then try again. "
+                    f"(On this Wi-Fi only, with remote_bind set: code {session['display_code']}.)")
+        self.phone_pair_label.set_text(text)
+        return False
 
     # -- animation settings ------------------------------------------------------
     ANIMATION_SWITCHES = [
@@ -4891,19 +5379,14 @@ class AssistantWindow(Gtk.Window):
         if self._pinch_cursor_armed:
             return
         if not screen_control.enabled:
-            if self._action_confirm_pending:
-                # Something else is already waiting on the Yes/No row, and a
-                # background thread is blocked until it is answered. Don't
-                # replace that question with this one.
-                self.camera_overlay.set_visible(True)
-                self.camera_overlay.set_recording(
-                    "Answer the pending confirmation first, then turn hand pointing on again")
-                return
             # Same one-time confirmation any other pointer action needs. It
-            # has to be answered before a hand can move the real cursor.
-            self.confirm_label.set_text("Let Toby move the cursor with your hand?")
-            self._pending_confirm_purpose = "pinch_cursor"
-            self._show_confirm_dialog()
+            # has to be answered, here at the computer, before a hand can
+            # move the real cursor.
+            def ask():
+                allowed = self.approvals.ask("Let Toby move the cursor with your hand?", kind="control",
+                                             local_only=True, details=["Camera Mode's hand pointing."])
+                GLib.idle_add(self._after_pinch_answer, allowed)
+            threading.Thread(target=ask, daemon=True).start()
             return
         self._pinch_cursor_armed = True
         self._pointer_smoothed = None
@@ -5102,6 +5585,15 @@ class AssistantWindow(Gtk.Window):
         smart_tag = "[Smart] " if will_use_cloud else ""
         self.task_label_text = smart_tag + (text if len(text) <= 60 else text[:57] + "…")
         self.task_steps = [("Thinking", "current")]
+        self.task_step_details = {}
+        self._worker_steps = 1
+        self._thinking_step = 0
+        self._resume_event.set()
+        self._task_origin = self._next_origin or "computer"
+        self._next_origin = None
+        self.current_task_id = self._next_task_id or TASKS.start(text, self._task_origin)
+        self._next_task_id = None
+        computer_tools.touched(reset=True)
         self._voice_spoken_len = 0
         if self.island_expanded.get_visible():
             self.island_expanded.set_task(self.task_label_text, self.task_steps)
@@ -5227,62 +5719,118 @@ class AssistantWindow(Gtk.Window):
         # them (mouse/keyboard via ydotool, subprocess calls in general) can
         # block or hang (e.g. if ydotoold isn't running), and this must never
         # be allowed to freeze the GTK main thread. When an action needs
-        # confirmation, we idle_add the dialog onto the main thread and then
-        # wait on an Event here — that blocks only this background thread,
-        # not the UI, while the user decides.
-        actions_succeeded = self._execute_actions(result.get("actions", []))
+        # confirmation, the question goes up on the computer and the phones
+        # and this thread waits for the answer — not the UI.
+        results = []
+        actions_succeeded = self._execute_actions(result.get("actions", []), results)
+
+        # Looking tools (status, files, programs, commands) return what they
+        # found; the model gets another turn to answer from real results
+        # rather than from what it guessed before looking.
+        rounds = 1
+        while (not self.task_cancelled and rounds < MAX_TOOL_ROUNDS
+               and any(a.get("tool") in FOLLOW_UP_TOOLS for a, _out, _ok in results)):
+            rounds += 1
+            self._thinking_step = self._worker_steps
+            self._worker_steps += 1
+            GLib.idle_add(self._append_task_step, "Looking at the results", "current")
+            self._set_task_state("thinking")
+            try:
+                result = think_fn(self._follow_up_prompt(text, results), self.history,
+                                  on_chunk=on_chunk, cancel_check=cancel_check)
+            except Exception as e:
+                result = {"reply": f"Ollama error while reading the results: {e}", "actions": [],
+                          "mood": "concerned"}
+                break
+            if result.get("_cancelled"):
+                GLib.idle_add(self.finish_cancelled)
+                return False
+            results = []
+            actions_succeeded += self._execute_actions(result.get("actions", []), results)
         GLib.idle_add(self.finish_response, text, result, actions_succeeded)
         return False
 
-    def _execute_actions(self, actions):
+    def _execute_actions(self, actions, results=None):
+        """Run one round of actions on the task thread.
+
+        Every action is classified first (permissions.py): safe ones run, ones
+        that change something wait for a yes from the computer or a phone,
+        and restricted ones are refused unless allowed on the computer. What
+        each action returned goes into results as (action, text, ok), so the
+        model can be shown it. Returns how many actions succeeded.
+        """
+        results = results if results is not None else []
         actions_succeeded = 0
-        GLib.idle_add(self._set_task_step_status, 0, "done")  # "Thinking" step complete
+        GLib.idle_add(self._set_task_step_status, self._thinking_step, "done")
+        base = self._worker_steps
+        self._worker_steps += len(actions)
         GLib.idle_add(self._extend_task_steps, actions)
+        if not actions:
+            return 0
 
         if self._chibi_enabled() and any(a.get("tool") in PHYSICAL_TOOLS for a in actions):
+            self._set_task_state("preparing")
             GLib.idle_add(self._chibi_begin)
             time.sleep(toby_anim.animation_settings(SETTINGS)["chibi_transform_duration"] * 0.8)
+        self._set_task_state("working")
+
+        def fail(index, action, message, stop=False):
+            GLib.idle_add(self._set_task_step_status, index, "error", message)
+            results.append((action, message, False))
+            return stop
 
         for i, action in enumerate(actions):
+            index = base + i
+            self._wait_if_paused()
             if self.task_cancelled:
-                GLib.idle_add(self._set_task_step_status, i + 1, "error")
+                GLib.idle_add(self._set_task_step_status, index, "error")
                 break
-            GLib.idle_add(self._set_task_step_status, i + 1, "current")
-            fn = DISPATCH.get(action.get("tool"))
+            GLib.idle_add(self._set_task_step_status, index, "current")
+            tool = action.get("tool")
+            fn = DISPATCH.get(tool)
             if not fn:
-                GLib.idle_add(self._set_task_step_status, i + 1, "error")
+                fail(index, action, f"There's no tool called {tool!r}.")
+                continue
+            decision = permissions.classify(action)
+            if not permissions.allowed_at_all(decision, SETTINGS):
+                fail(index, action, f"Refused: {decision.title}, because {decision.reason}. Restricted "
+                                    f"actions are turned off on this computer.")
                 continue
             # Ask before Toby reaches for the mouse or keyboard, not after:
             # the chibi shouldn't take hold of the pointer and then ask.
-            if action.get("tool") in CONTROL_TOOLS and not screen_control.enabled:
-                if not self._await_confirmation():
-                    GLib.idle_add(self._set_task_step_status, i + 1, "error")
+            if tool in CONTROL_TOOLS:
+                if not screen_control.enabled and not self._await_confirmation():
+                    fail(index, action, "You didn't allow mouse and keyboard control.")
+                    break
+            elif decision.level != permissions.SAFE and tool != "install_package":
+                if not self._await_confirmation(decision.title, kind="action", level=decision.level,
+                                                details=decision.details, reason=decision.reason, tool=tool):
+                    fail(index, action, "You said no, so Toby stopped here." if not self.task_cancelled
+                         else "Cancelled.")
                     break
             try:
                 self._chibi_choreograph(action)
             except Exception as e:
                 print("CHIBI ERROR:", e, flush=True)   # never let the show stop the task
             try:
-                result_summary = fn(action)
-                note_recent_action(action.get("tool", "?"), str(result_summary)[:80])
-                actions_succeeded += 1
-                GLib.idle_add(self._set_task_step_status, i + 1, "done")
-                if action.get("tool") == "set_school_schedule":
-                    self.school_mode_config = school_mode.load_config()
-            except NeedsConfirmation:
-                if not self._await_confirmation():
-                    GLib.idle_add(self._set_task_step_status, i + 1, "error")
-                    break
                 try:
                     result_summary = fn(action)
-                    note_recent_action(action.get("tool", "?"), str(result_summary)[:80])
-                    actions_succeeded += 1
-                    GLib.idle_add(self._set_task_step_status, i + 1, "done")
-                except Exception as e:
-                    GLib.idle_add(self._set_task_step_status, i + 1, "error")
-                    print("ACTION ERROR:", e, flush=True)
+                except NeedsConfirmation:
+                    install = tool == "install_package"
+                    title = f"Install {action.get('package', 'a package')}?" if install else None
+                    if not self._await_confirmation(title, kind="install" if install else "control", tool=tool):
+                        fail(index, action, "You said no, so Toby stopped here.")
+                        break
+                    result_summary = fn(action)
+                text_out = str(result_summary)
+                note_recent_action(tool or "?", text_out[:80])
+                actions_succeeded += 1
+                results.append((action, text_out, True))
+                GLib.idle_add(self._set_task_step_status, index, "done", text_out.split("\n", 1)[0][:160])
+                if tool == "set_school_schedule":
+                    self.school_mode_config = school_mode.load_config()
             except Exception as e:
-                GLib.idle_add(self._set_task_step_status, i + 1, "error")
+                fail(index, action, f"That didn't work: {e}")
                 print("ACTION ERROR:", e, flush=True)
             finally:
                 try:
@@ -5292,19 +5840,60 @@ class AssistantWindow(Gtk.Window):
 
         return actions_succeeded
 
-    def _await_confirmation(self):
-        """Show the "use your mouse and keyboard?" prompt and wait for it.
+    def _await_confirmation(self, title=None, kind="control", level="confirm", details=(), reason="", tool=""):
+        """Ask on the computer and every paired phone, and wait for a yes.
 
         Blocks this background thread only, never the UI. The chibi, if
-        it's out, stops and waits with the user rather than carrying on.
+        it's out, stops and waits with the user rather than carrying on. A
+        cancelled task, or ten minutes with no answer, counts as no.
         """
-        self._confirm_event.clear()
-        self._action_confirm_pending = True
+        if kind == "control" and not details:
+            details = ["Toby will move the pointer, click and type for you until you turn it off."]
         if self.chibi_director.visible:
             GLib.idle_add(lambda: self.chibi_director.ask_permission() and False)
-        GLib.idle_add(self._show_confirm_dialog)
-        self._confirm_event.wait()
-        return self._confirm_result
+        self._set_task_state("needs_permission")
+        if self._task_origin.startswith("phone"):
+            self._event("needs_permission", "Toby needs your OK", title or self.CONFIRM_TEXT)
+        allowed = self.approvals.ask(title or self.CONFIRM_TEXT, level=level, details=details, reason=reason,
+                                     tool=tool, origin=self._task_origin, kind=kind,
+                                     cancel_check=lambda: self.task_cancelled)
+        if allowed and kind == "control":
+            screen_control.grant()
+        if allowed and kind == "install":
+            install_guard.grant_once()
+        self._set_task_state("working")
+        return allowed
+
+    def _wait_if_paused(self):
+        if self._resume_event.is_set():
+            return
+        self._set_task_state("paused")
+        while not self._resume_event.wait(0.25):
+            if self.task_cancelled:
+                return
+        self._set_task_state("working")
+
+    def _set_task_state(self, state):
+        """Called from any thread; the task record is thread-safe."""
+        task_id = self.current_task_id
+        if task_id and TASKS.update(task_id, state=state):
+            GLib.idle_add(lambda: self._publish_remote_state(force=True) and False)
+
+    def _follow_up_prompt(self, text, results):
+        lines = []
+        for action, output, ok in results:
+            lines.append(f"- {describe_action(action)} [{'ok' if ok else 'did not work'}]: {output[:1500]}")
+        body = "\n".join(lines)[:6000]
+        return (f"{text}\n\n[WHAT YOUR ACTIONS RETURNED: real results from the computer]\n{body}\n\n"
+                "Now answer the user's request from these results in \"reply\", in plain words (no raw "
+                "dumps unless they asked for output). If more steps are genuinely needed, put them in "
+                "\"actions\"; never repeat an action that already worked.")
+
+    def _append_task_step(self, label, status):
+        self.task_steps.append((label, status))
+        self._sync_chibi_steps()
+        self._publish_remote_state()
+        return False
 
     def _extend_task_steps(self, actions):
         self.task_steps += [(describe_action(a), "pending") for a in actions]
@@ -5326,6 +5915,12 @@ class AssistantWindow(Gtk.Window):
         self.island.set_progress(done, len(steps), current)
         if not self.get_visible() and not self.island.showing_card():
             self.island.show_island(self.island.label.get_text())
+
+    def set_work_mode(self, on):
+        SETTINGS["work_mode"] = bool(on)
+        toby_settings.save(SETTINGS)
+        self._publish_remote_state(force=True)
+        return False
 
     def _chibi_enabled(self):
         return toby_anim.animation_settings(SETTINGS)["chibi_enabled"]
@@ -5474,6 +6069,17 @@ class AssistantWindow(Gtk.Window):
         if action.get("tool") in ("type_text", "key_press", "close_tab"):
             GLib.idle_add(lambda: director.end_typing() and False)
 
+    def _after_pinch_answer(self, allowed):
+        if allowed:
+            screen_control.grant()
+            self._arm_pinch_cursor()
+        else:
+            self.settings_pinch_cursor_switch.set_active(False)
+            SETTINGS["camera_pinch_cursor"] = False
+            toby_settings.save(SETTINGS)
+            self._disarm_pinch_cursor("Hand pointing needs mouse control")
+        return False
+
     CONFIRM_TEXT = "Let Toby use your mouse and keyboard?"
 
     def _start_fingerprint_scan(self, attempt=1):
@@ -5539,7 +6145,28 @@ class AssistantWindow(Gtk.Window):
         self.input_shape_combine_region(None)
         return False
 
+    def _finish_task_record(self, reply, actions_succeeded=0, cancelled=False):
+        """Close the task's record: its steps, the files it touched, and how
+        it went — failed only if something went wrong and nothing worked."""
+        task_id = self.current_task_id
+        if not task_id:
+            return
+        steps = [{"label": label, "status": status, "detail": self.task_step_details.get(i, "")}
+                 for i, (label, status) in enumerate(self.task_steps) if label != "Thinking"]
+        TASKS.set_steps(task_id, steps)
+        for path, action in computer_tools.touched(reset=True):
+            TASKS.add_file(task_id, path, action)
+        errored = any(st["status"] == "error" for st in steps)
+        state = "cancelled" if cancelled else ("failed" if errored and not actions_succeeded else "completed")
+        task = TASKS.finish(task_id, state, reply)
+        if self._task_origin.startswith("phone") and task:
+            if state == "completed":
+                self._event("task_done", "Done: " + task["text"][:60], (reply or "")[:200])
+            elif state == "failed":
+                self._event("task_failed", "Couldn't finish: " + task["text"][:50], (reply or "")[:200])
+
     def finish_cancelled(self):
+        self._finish_task_record("Cancelled.", cancelled=True)
         self._set_task_step_status(self._current_step_index(), "error")
         self._chibi_end()
         self._busy = False
@@ -5556,6 +6183,7 @@ class AssistantWindow(Gtk.Window):
     def finish_response(self, text, result, actions_succeeded=0):
         self._waiting_for_first_chunk = False  # safety net in case no partial "reply" text ever streamed
         self._chibi_end(result.get("reply", "") if not self.task_cancelled else "")
+        self._finish_task_record(result.get("reply", ""), actions_succeeded, cancelled=self.task_cancelled)
         self._busy = False
         self._remote_reply = result.get("reply", "") or ("Cancelled." if self.task_cancelled else "")
         self._publish_remote_state(force=True)
@@ -5706,46 +6334,44 @@ class AssistantWindow(Gtk.Window):
 
     # -- confirm handlers -----------------------------------------------------
     def on_confirm_yes(self, *_a):
-        self._cancel_fingerprint_scan()
-        GLib.idle_add(lambda: self._publish_remote_state(force=True))
-        screen_control.grant()
-        install_guard.grant_once()
-        self.confirm_row.set_visible(False)
-        self.input_shape_combine_region(None)
-        purpose = self._pending_confirm_purpose
-        self._pending_confirm_purpose = None
-        self.confirm_label.set_text(self.CONFIRM_TEXT)
-        if purpose == "pinch_cursor" and not self._action_confirm_pending:
-            # This prompt came from the Camera Mode switch, not from an
-            # action waiting on a background thread, so nothing is blocked
-            # on the event — just carry on and arm it.
-            self._arm_pinch_cursor()
-            return
-        self._action_confirm_pending = False
-        self._confirm_result = True
-        self._confirm_event.set()
-        if purpose == "pinch_cursor":
-            self._arm_pinch_cursor()
+        self._answer_shown_approval(True)
 
     def on_confirm_no(self, *_a):
+        self._answer_shown_approval(False)
+
+    def _answer_shown_approval(self, allow):
         self._cancel_fingerprint_scan()
-        GLib.idle_add(lambda: self._publish_remote_state(force=True))
-        screen_control.deny()
-        self.confirm_row.set_visible(False)
-        self.input_shape_combine_region(None)
-        purpose = self._pending_confirm_purpose
-        self._pending_confirm_purpose = None
-        self.confirm_label.set_text(self.CONFIRM_TEXT)
-        if purpose == "pinch_cursor":
-            self.settings_pinch_cursor_switch.set_active(False)
-            SETTINGS["camera_pinch_cursor"] = False
-            toby_settings.save(SETTINGS)
-            self._disarm_pinch_cursor("Hand pointing needs mouse control")
-            if not self._action_confirm_pending:
-                return
-        self._action_confirm_pending = False
-        self._confirm_result = False
-        self._confirm_event.set()
+        if self._shown_approval:
+            self.approvals.answer(self._shown_approval, allow, by="computer")
+        # the approval center's change callback hides the row or shows the next
+
+    def _on_approvals_changed(self):
+        """Show the oldest open question in the pill, or put the row away."""
+        pending = self.approvals.pending()
+        current = pending[0] if pending else None
+        if current is None:
+            if self._shown_approval is not None:
+                self._shown_approval = None
+                self._cancel_fingerprint_scan()
+                self.confirm_row.set_visible(False)
+                self.confirm_label.set_text(self.CONFIRM_TEXT)
+                self.confirm_label.set_tooltip_text(None)
+                self.input_shape_combine_region(None)
+        elif current["id"] != self._shown_approval:
+            self._shown_approval = current["id"]
+            text = current["title"]
+            if not text.endswith("?"):
+                text = f"Toby wants to: {text}. Allow?"
+            if current["level"] == permissions.RESTRICTED and current["reason"]:
+                text += f" (Careful: {current['reason']}.)"
+            self.confirm_label.set_text(text)
+            self.confirm_label.set_line_wrap(True)
+            self.confirm_label.set_max_width_chars(60)
+            details = [d for d in current["details"] if d]
+            self.confirm_label.set_tooltip_text("\n".join(details) or None)
+            self._show_confirm_dialog()
+        self._publish_remote_state(force=True)
+        return False
 
     # -- show/hide with wake sequence ---------------------------------------
     def toggle(self, *_args):

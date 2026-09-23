@@ -71,7 +71,7 @@ Everything after installing is one command:
 | `toby doctor` | check everything, change nothing |
 | `toby sleep` | play the whole lid fold, then suspend |
 | `toby fold preview` | play the fold and unfold without suspending |
-| `toby phone on`, `pair`, `reset`, `off` | the phone app |
+| `toby phone on`, `pair`, `devices`, `revoke`, `reset`, `off` | pairing and managing phones |
 | `toby animations on`, `off` | Toby-style window animations |
 | `toby model`, `toby model <name>` | see or choose the local model |
 | `toby update` | pull the latest version and refresh dependencies |
@@ -346,40 +346,68 @@ The unfold on opening is fully visible. To watch the whole close, run
 open, then suspends. `toby fold preview` plays both halves without
 suspending.
 
-## Talking to Toby from your phone
+## Controlling your computer from your phone
 
-The phone app is a small installable web app, the same on iPhone and
-Android. Turn it on and pair:
+Toby lives on your computer, and your phone is its remote. From anywhere,
+you can tell Toby to do things on the computer: "is my game still
+running?", "run the tests in ~/project", "open Claude Code in my project",
+"put the PDF from Downloads in Documents", "how's the build going?". The
+phone shows the task live: each step as it happens, what it found, anything
+waiting for your OK, and the reply.
+
+There's a native iPhone app (see [docs/COMPANION.md](docs/COMPANION.md) for
+installing it) and a web app for Android or any browser. Both pair the
+same way:
 
 ```bash
-toby phone on
+toby phone on       # once: sets up Tailscale publishing and starts pairing
 ```
 
-That prints a QR code. Scan it with the phone's camera, then **Share, Add
-to Home Screen** (iPhone) or **Install app** (Android), and Toby is an app
-on your home screen. Type or tap the microphone and say what you want; the
-laptop does it, and the phone shows the same live checklist, the reply, and
-any permission prompt — which you can answer from the phone.
+After that, pair more phones from Toby's **Settings, Phone, Connect a phone**,
+or with `toby phone pair`. Either shows a QR code and an eight-character
+code. Scan it in the iPhone app (or with the camera, for the web app), check
+that the phone and the computer show the same six-digit number, and approve
+on the computer. Only the computer can approve a new phone.
 
-It works from anywhere your phone has internet, through
-[Tailscale](https://tailscale.com): a free, private network between your own
-devices. Install it on the laptop (`./install.sh --phone`, or
-`sudo pacman -S tailscale`) and on the phone, and sign in to the same
-account on both. Toby itself only ever listens on the laptop's loopback
-address; Tailscale publishes it to your devices alone, with a real HTTPS
-certificate. Nothing is exposed to the public internet and nothing passes
-through anyone else's server.
+**What Toby can do from the phone:** check the computer's status (real CPU,
+memory, battery and uptime), see which windows and programs are open and
+for how long, switch windows, list, search, read, write, move and delete
+files (delete means the trash, and anything overwritten is backed up first),
+run commands and keep an eye on long ones (builds, tests, downloads) in the
+background, open a terminal in a project running the tool you name, and
+everything Toby could already do.
 
-On top of that, every request needs the pairing code from the QR — 256
-random bits, kept in a file only you can read, compared in constant time,
-with a lockout after repeated wrong guesses. A paired phone can do no more
-than you can at the keyboard: the mouse, keyboard and installs still stop
-at the same permission prompt. `toby phone reset` unpairs every phone at
-once; `toby phone off` turns the whole thing off.
+**What it asks about first.** Every action has a level:
 
-It's a web app rather than a store app on purpose: one version works on
-both platforms, updates itself from your laptop, and needs no developer
-account or App Store review.
+- *Safe* (looking, opening apps and pages): done straight away.
+- *Confirm* (changing or deleting files, running commands, stopping
+  programs, downloading, sending messages, using the mouse and keyboard):
+  Toby asks on the phone and on the computer, and waits. Ten minutes with no
+  answer counts as no.
+- *Restricted* (sudo, recursive deletes, formatting, piping the internet
+  into a shell, anything outside your home folder, your keys and
+  passwords): refused, unless you turn on **Allow restricted actions** on
+  the computer. Even then Toby asks each time and says why it's risky.
+
+**Seeing the screen** from the phone is off until you turn on **Let paired
+phones see the screen** on the computer, and while a phone is looking, the
+computer says so.
+
+**Notifications** (a task finished, Toby needs your OK, a build failed, the
+computer is going to sleep) reach the app while it's open. For ones that
+always arrive, point Toby at an [ntfy](https://ntfy.sh) topic
+(`"notify_ntfy_url"` in settings.json); see docs/COMPANION.md.
+
+**How it's reached, and why that's safe.** Toby only ever listens on the
+computer's loopback address. [Tailscale](https://tailscale.com), a free,
+private network between your own devices, publishes it to your devices
+alone, encrypted end to end and with a real HTTPS certificate, from any
+network. Nothing is exposed to the public internet. Each phone has its own
+token (the computer keeps only a hash of it), wrong guesses are locked out,
+and you can unpair any phone from the computer (`toby phone devices`,
+`toby phone revoke <name>`, or the Unpair button), from another phone, or
+by logging out on the phone itself. `toby phone reset` unpairs them all;
+`toby phone off` turns the whole thing off.
 
 ## Fingerprint approval
 

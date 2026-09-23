@@ -1,40 +1,63 @@
-// Little Toby phone app.
+// Little Toby web app — the phone companion for Android, or any browser.
+// (On iPhone, the native Little Toby app does all this and more.)
 //
-// Pairing: the laptop's QR code opens this page with #pair=<token>. The token
-// is read once, kept in this phone's storage, and wiped from the address bar
-// so it never sits in history or a screenshot. Every API call sends it as a
-// bearer token.
+// Pairing: the computer's QR code opens this page with #pair=<code>, a
+// one-time eight-character code. The page sends it with a random id for this
+// phone, shows the six-digit number the computer is also showing, and waits
+// while you approve on the computer. Only then does this phone receive its
+// own token, which it keeps in local storage and sends with every request.
+// The code is wiped from the address bar as soon as it's read.
 //
-// Updates: /api/state is long-polled — the laptop answers the moment
-// anything changes, or after ~20 s with nothing new — so the task list and
-// reply update live without the phone hammering the laptop.
+// Updates: /api/state is long-polled — the computer answers the moment
+// anything changes, or after ~20 s with nothing new — so the task list,
+// permission prompts and reply update live without hammering the computer.
 "use strict";
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "toby.pairing";
+const DEVICE_KEY = "toby.device";
+const STATE_WORDS = {
+  thinking: "Thinking", preparing: "Getting ready", working: "Working", waiting: "Waiting",
+  needs_permission: "Needs your OK", paused: "Paused", completed: "Done", failed: "Didn't finish",
+  cancelled: "Stopped",
+};
 let token = null;
 let version = null;
 let lastReply = "";
 let polling = false;
 let backoff = 1000;
+let approvalId = null;
+let taskState = null;
 
-function readToken() {
-  const match = location.hash.match(/pair=([A-Za-z0-9_-]{32,})/);
-  if (match) {
-    try { localStorage.setItem(TOKEN_KEY, match[1]); } catch (_) {}
-    history.replaceState(null, "", location.pathname);
-    return match[1];
-  }
-  try { return localStorage.getItem(TOKEN_KEY); } catch (_) { return null; }
+function store(key, value) {
+  try { value === null ? localStorage.removeItem(key) : localStorage.setItem(key, value); } catch (_) {}
+}
+function load(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
 }
 
-async function api(path, body, signal) {
-  const opts = {
-    method: body === undefined ? "GET" : "POST",
-    headers: { Authorization: "Bearer " + token },
-    cache: "no-store",
-    signal,
-  };
+function deviceId() {
+  let id = load(DEVICE_KEY);
+  if (!id) {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    id = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+    store(DEVICE_KEY, id);
+  }
+  return id;
+}
+
+function deviceName() {
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return "iPhone (web app)";
+  if (/iPad/.test(ua)) return "iPad (web app)";
+  if (/Android/.test(ua)) return "Android phone (web app)";
+  return "Browser (web app)";
+}
+
+async function api(path, body, { auth = true } = {}) {
+  const opts = { method: body === undefined ? "GET" : "POST", headers: {}, cache: "no-store" };
+  if (auth) opts.headers.Authorization = "Bearer " + token;
   if (body !== undefined) {
     opts.headers["Content-Type"] = "application/json";
     opts.body = JSON.stringify(body);
@@ -42,7 +65,7 @@ async function api(path, body, signal) {
   const resp = await fetch(path, opts);
   let data = {};
   try { data = await resp.json(); } catch (_) {}
-  if (resp.status === 401) { unpair(); throw new Error("unpaired"); }
+  if (resp.status === 401 && auth) { unpair("This phone was unpaired. Pair it again to keep using Toby."); throw new Error("unpaired"); }
   return { ok: resp.ok, status: resp.status, data };
 }
 
@@ -55,11 +78,14 @@ function setStatus(kind, text) {
 // -- rendering ------------------------------------------------------------------------
 function render(state) {
   const busy = !!state.busy;
-  setStatus(busy ? "busy" : "online", busy ? "Working on your laptop" : "Connected to your laptop");
+  const name = (state.computer && state.computer.name) || "your computer";
+  if (state.power === "sleeping") setStatus("offline", name + " is going to sleep");
+  else setStatus(busy ? "busy" : "online", busy ? "Working on " + name : "Connected to " + name);
 
   const face = $("face");
-  face.classList.toggle("thinking", busy && !(state.steps || []).length);
+  face.classList.toggle("thinking", busy && (!state.task || state.task.state === "thinking"));
 
+  const task = state.task;
   if (state.reply && state.reply !== lastReply) {
     lastReply = state.reply;
     $("reply").textContent = state.reply;
@@ -70,28 +96,53 @@ function render(state) {
       speak(state.reply);
     }
   } else if (busy && !state.reply) {
-    $("reply").textContent = state.task ? "On it: " + state.task : "Thinking…";
+    $("reply").textContent = task ? "On it: " + task.text : "Thinking…";
   }
 
-  const steps = state.steps || [];
-  $("task").hidden = steps.length === 0;
-  if (steps.length) {
-    $("task-title").textContent = busy ? (state.task || "Working on it") : "Done";
+  const steps = (task && task.steps) || [];
+  $("task").hidden = !task || (steps.length === 0 && !busy);
+  if (task) {
+    taskState = task.state;
+    $("task-title").textContent = task.text;
+    $("task-state").textContent = STATE_WORDS[task.state] || "";
+    $("task-state").className = "state " + task.state;
     const done = steps.filter((s) => s.status === "done").length;
-    $("progress-bar").style.width = Math.round((done / steps.length) * 100) + "%";
-    const list = $("steps");
-    list.replaceChildren(...steps.map((s) => {
+    $("progress-bar").style.width = steps.length ? Math.round((done / steps.length) * 100) + "%" : "0%";
+    $("steps").replaceChildren(...steps.map((s) => {
       const li = document.createElement("li");
-      li.textContent = s.label;
       li.className = s.status;
+      const label = document.createElement("span");
+      label.className = "label";
+      label.textContent = s.label;
+      li.append(label);
+      if (s.detail && (s.status === "error" || s.status === "done")) {
+        const d = document.createElement("span");
+        d.className = "detail";
+        d.textContent = s.detail;
+        li.append(d);
+      }
       return li;
     }));
     $("cancel").hidden = !busy;
+    $("pause").hidden = !busy;
+    $("pause").textContent = task.state === "paused" ? "Resume" : "Pause";
   }
 
-  const confirm = state.confirm;
-  $("confirm").hidden = !(confirm && confirm.pending);
-  if (confirm && confirm.pending) $("confirm-text").textContent = confirm.text;
+  const approval = (state.approvals || [])[0];
+  $("confirm").hidden = !approval;
+  approvalId = approval ? approval.id : null;
+  if (approval) {
+    $("confirm-text").textContent = approval.title.replace(/\?$/, "");
+    $("confirm-details").replaceChildren(...(approval.details || []).map((d) => {
+      const li = document.createElement("li");
+      li.textContent = d;
+      return li;
+    }));
+    const restricted = approval.level === "restricted";
+    $("confirm").classList.toggle("restricted", restricted);
+    $("confirm-reason").hidden = !restricted;
+    $("confirm-reason").textContent = restricted ? "Careful: " + approval.reason + "." : "";
+  }
 }
 
 // -- the long-poll loop -------------------------------------------------------------------
@@ -111,7 +162,7 @@ async function poll() {
       }
     } catch (err) {
       if (err.message === "unpaired") break;
-      setStatus("offline", "Can't reach your laptop");
+      setStatus("offline", "Can't reach your computer. It may be asleep, off or offline.");
       await wait(backoff);
       backoff = Math.min(backoff * 2, 15000);
     }
@@ -131,7 +182,7 @@ async function send(text) {
     const { ok, data } = await api("/api/ask", { text });
     if (!ok) $("reply").textContent = data.message || data.error || "Toby couldn't take that right now.";
   } catch (_) {
-    $("reply").textContent = "Can't reach your laptop. Is it on and online?";
+    $("reply").textContent = "Can't reach your computer. Is it on and online?";
   }
 }
 
@@ -180,12 +231,80 @@ function speak(text) {
 }
 
 // -- pairing ------------------------------------------------------------------------------------
-function unpair() {
+const CODE_CHARS = /[^23456789ABCDEFGHJKMNPQRSTUVWXYZ]/g;
+
+function pairStatus(html) {
+  const el = $("pair-status");
+  el.hidden = !html;
+  el.replaceChildren();
+  if (html) el.append(...html);
+}
+
+async function pairWithCode(raw) {
+  const code = String(raw || "").toUpperCase().replace(CODE_CHARS, "");
+  if (code.length !== 8) {
+    pairStatus([document.createTextNode("The code is eight letters and numbers, like K7M4-XQ2P.")]);
+    return;
+  }
+  pairStatus([document.createTextNode("Checking the code…")]);
+  let claim;
+  try {
+    claim = await api("/api/pair/claim", { code, device_name: deviceName(), device_id: deviceId(), platform: "web" },
+                      { auth: false });
+  } catch (_) {
+    pairStatus([document.createTextNode("Can't reach your computer from here.")]);
+    return;
+  }
+  if (!claim.ok) {
+    pairStatus([document.createTextNode(claim.data.error || "That code didn't work.")]);
+    return;
+  }
+  const number = claim.data.compare;
+  const big = document.createElement("span");
+  big.className = "compare";
+  big.textContent = number.slice(0, 3) + " " + number.slice(3);
+  pairStatus([document.createTextNode("Approve this phone on " + claim.data.computer.name +
+                                      ". It should be showing the same number:"), big]);
+  for (let tries = 0; tries < 20; tries++) {
+    let result;
+    try {
+      result = await api("/api/pair/wait?claim=" + encodeURIComponent(claim.data.claim), undefined, { auth: false });
+    } catch (_) {
+      await wait(2000);
+      continue;
+    }
+    const status = result.data.status;
+    if (status === "approved" && result.data.token) {
+      store(TOKEN_KEY, result.data.token);
+      pairStatus(null);
+      paired(result.data.token);
+      return;
+    }
+    if (status !== "pending") {
+      const why = { denied: "The computer said no.", expired: "That took too long. Start pairing again.",
+                    unknown: "The computer restarted. Start pairing again." }[status] || "Pairing didn't finish.";
+      pairStatus([document.createTextNode(why)]);
+      return;
+    }
+  }
+}
+
+function readPairingLink() {
+  const match = location.hash.match(/pair=([A-Za-z0-9_-]+)/);
+  if (!match) return null;
+  history.replaceState(null, "", location.pathname);
+  return match[1];
+}
+
+function unpair(message) {
   token = null;
-  try { localStorage.removeItem(TOKEN_KEY); } catch (_) {}
+  store(TOKEN_KEY, null);
   $("pair").hidden = false;
   $("composer").hidden = true;
+  $("task").hidden = true;
+  $("confirm").hidden = true;
   setStatus("offline", "Not paired");
+  if (message) pairStatus([document.createTextNode(message)]);
 }
 
 function paired(t) {
@@ -198,20 +317,34 @@ function paired(t) {
 
 // -- wiring ---------------------------------------------------------------------------------------
 $("composer").addEventListener("submit", (e) => { e.preventDefault(); send($("text").value); });
-$("confirm-yes").addEventListener("click", () => api("/api/confirm", { answer: true }).catch(() => {}));
-$("confirm-no").addEventListener("click", () => api("/api/confirm", { answer: false }).catch(() => {}));
-$("cancel").addEventListener("click", () => api("/api/cancel", {}).catch(() => {}));
-$("pair-save").addEventListener("click", () => {
-  const code = $("pair-code").value.trim().replace(/^.*pair=/, "");
-  if (code.length < 32) return;
-  try { localStorage.setItem(TOKEN_KEY, code); } catch (_) {}
-  paired(code);
+$("confirm-yes").addEventListener("click", () => {
+  if (approvalId) api("/api/approve", { id: approvalId, allow: true }).catch(() => {});
 });
+$("confirm-no").addEventListener("click", () => {
+  if (approvalId) api("/api/approve", { id: approvalId, allow: false }).catch(() => {});
+});
+$("cancel").addEventListener("click", () => api("/api/task/stop", {}).catch(() => {}));
+$("pause").addEventListener("click", () =>
+  api(taskState === "paused" ? "/api/task/resume" : "/api/task/pause", {}).catch(() => {}));
+$("pair-save").addEventListener("click", () => pairWithCode($("pair-code").value));
 document.addEventListener("visibilitychange", () => { if (!document.hidden && token) poll(); });
 
 setupMic();
-const saved = readToken();
-if (saved) paired(saved); else unpair();
+const link = readPairingLink();
+const saved = load(TOKEN_KEY);
+if (link && link.length >= 32) {
+  // a link from before per-device pairing carried the token itself
+  store(TOKEN_KEY, link);
+  paired(link);
+} else if (link) {
+  unpair();
+  $("pair-code").value = link;
+  pairWithCode(link);
+} else if (saved) {
+  paired(saved);
+} else {
+  unpair();
+}
 
 if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/sw.js").catch(() => {});

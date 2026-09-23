@@ -6,7 +6,7 @@ toby — the one command for Little Toby.
     toby start | stop | restart | status
     toby sleep              play the lid fold in full, then suspend
     toby fold preview       play the fold and unfold, without suspending
-    toby phone on | off | pair | reset | status
+    toby phone on | off | pair | devices | revoke <name> | reset | status
     toby animations on | off | status
     toby model [name]       show the model in use, or choose one
     toby doctor             check everything, change nothing
@@ -147,17 +147,9 @@ def cmd_fold(args):
 # ---------------------------------------------------------------------------
 
 def tailscale_name():
-    """This laptop's name on your tailnet, if Tailscale is up."""
-    if not have("tailscale"):
-        return None
-    out = run(["tailscale", "status", "--json"])
-    if out.returncode:
-        return None
-    try:
-        name = json.loads(out.stdout).get("Self", {}).get("DNSName", "")
-    except ValueError:
-        return None
-    return name.rstrip(".") or None
+    """This computer's name on your tailnet, if Tailscale is up."""
+    import remote_bridge
+    return remote_bridge.tailscale_name()
 
 
 def lan_address():
@@ -180,6 +172,59 @@ def show_qr(text):
     return False
 
 
+def phone_base_url(settings, port):
+    """The address a phone uses to reach this computer, or (None, why not)."""
+    name = tailscale_name()
+    if name:
+        return f"https://{name}", "from anywhere your phone has internet (via Tailscale)"
+    if settings.get("remote_bind", "127.0.0.1") == "127.0.0.1":
+        return None, ("Without Tailscale, Toby only listens on this computer. Install Tailscale on "
+                      "this computer and your phone and run `sudo tailscale up` (recommended), or set "
+                      "\"remote_bind\": \"0.0.0.0\" in settings.json to allow phones on this Wi-Fi only "
+                      "(traffic on your Wi-Fi is then not encrypted).")
+    return f"http://{lan_address() or 'this-computer'}:{port}", "from this Wi-Fi only"
+
+
+def pair_phone(settings, port, ask=input):
+    """Pair a phone from the terminal, through the running Toby."""
+    import remote_bridge
+    base, where = phone_base_url(settings, port)
+    if base is None:
+        say(where)
+        return 1
+    status, session = remote_bridge.admin_call("/api/admin/pair/start", {"base_url": base}, port=port)
+    if status != 200:
+        say("Couldn't reach the running Toby to start pairing. Is it running? Try: toby start")
+        return 1
+    say("On your iPhone, open Little Toby and tap Pair a computer, then scan this code.")
+    say("(Scanned with the ordinary camera, it opens the web version instead.)")
+    if not show_qr(session["url"]):
+        say("(install qrencode to see a QR code here)")
+    say(f"Or type the address and code by hand:  {base}   {session['display_code']}")
+    say(f"It will work {where}. The code expires in {session['expires_in'] // 60} minutes.")
+    say("")
+    say("Waiting for your phone…")
+    deadline = session["expires_in"]
+    waited = 0
+    while waited < deadline:
+        status, body = remote_bridge.admin_call(
+            f"/api/admin/pair/claims?session={session['id']}&wait=25", port=port, timeout=35)
+        waited += 25
+        claims = body.get("claims", []) if status == 200 else []
+        if not claims:
+            continue
+        claim = claims[0]
+        say(f"{claim['name']} ({claim['platform']}) wants to pair.")
+        say(f"Your phone should show the number {claim['compare'][:3]} {claim['compare'][3:]}.")
+        answer = ask("If it does, pair it? [y/N] ").strip().lower()
+        allow = answer in ("y", "yes")
+        remote_bridge.admin_call("/api/admin/pair/decide", {"claim": claim["id"], "allow": allow}, port=port)
+        say("Paired. It can now reach Toby." if allow else "Not paired.")
+        return 0 if allow else 1
+    say("The code expired before a phone used it. Run `toby phone pair` to try again.")
+    return 1
+
+
 def cmd_phone(args):
     import remote_bridge
 
@@ -197,10 +242,12 @@ def cmd_phone(args):
                 say("You may need to allow HTTPS for your tailnet once, at "
                     "https://login.tailscale.com/admin/dns (turn on HTTPS Certificates).")
         else:
-            say("Tailscale isn't set up, so the phone app will only work on this Wi-Fi.")
-            say("For anywhere-access, install Tailscale on the laptop and phone and run: sudo tailscale up")
+            say("Tailscale isn't set up, so phones will only reach Toby on this Wi-Fi, if at all.")
+            say("For anywhere-access, install Tailscale on the computer and phone and run: sudo tailscale up")
         run(["systemctl", "--user", "restart", "toby.service"])
-        say("The phone app is on.")
+        say("The phone connection is on.")
+        import time as _time
+        _time.sleep(2)   # give Toby a moment to come back up
         return cmd_phone(["pair"])
 
     if action == "off":
@@ -208,46 +255,44 @@ def cmd_phone(args):
         if have("tailscale"):
             run(["tailscale", "serve", "reset"], timeout=20)
         run(["systemctl", "--user", "restart", "toby.service"])
-        say("The phone app is off. Toby is no longer reachable from your phone.")
+        say("The phone connection is off. Toby is no longer reachable from your phone.")
         return 0
 
     if action == "reset":
-        remote_bridge.reset_token()
-        run(["systemctl", "--user", "restart", "toby.service"])
+        remote_bridge.DeviceStore().reset()
         say("Every phone has been unpaired. Run `toby phone pair` to pair again.")
         return 0
 
     if action == "pair":
         if not settings.get("remote_enabled"):
-            say("The phone app is off. Turn it on with: toby phone on")
+            say("The phone connection is off. Turn it on with: toby phone on")
             return 1
-        token = remote_bridge.load_token()
-        name = tailscale_name()
-        if name:
-            base = f"https://{name}"
-            where = "from anywhere your phone has internet (via Tailscale)"
-        else:
-            if settings.get("remote_bind", "127.0.0.1") == "127.0.0.1":
-                say("Without Tailscale, Toby only listens on this laptop. To allow phones on this "
-                    "Wi-Fi, set \"remote_bind\": \"0.0.0.0\" in settings.json and restart — note that "
-                    "traffic on your Wi-Fi is then not encrypted.")
-                return 1
-            base = f"http://{lan_address() or 'this-laptop'}:{port}"
-            where = "from this Wi-Fi only"
-        url = remote_bridge.pairing_url(base, token)
-        say("Scan this with your phone's camera:")
-        if not show_qr(url):
-            say("(install qrencode to see a QR code here)")
-        say(url)
-        say("")
-        say(f"It will work {where}. Then use Share, Add to Home Screen (iPhone) or")
-        say("the menu, Install app (Android) to keep Toby on your home screen.")
-        say("Anyone with this link can use Toby — don't share it. `toby phone reset` revokes it.")
+        return pair_phone(settings, port)
+
+    if action == "devices":
+        devices = remote_bridge.DeviceStore().devices()
+        if not devices:
+            say("No phones are paired.")
+        for d in devices:
+            import time as _time
+            seen = _time.strftime("%d %b %H:%M", _time.localtime(d["last_seen"])) if d.get("last_seen") else "never"
+            say(f"{d['name']:<28} {d['platform']:<6} last used {seen}")
         return 0
 
-    say(f"phone app: {'on' if settings.get('remote_enabled') else 'off'}")
-    name = tailscale_name()
-    say(f"tailscale: {name or 'not set up'}")
+    if action == "revoke":
+        name = " ".join(args[1:]).strip().lower()
+        store = remote_bridge.DeviceStore()
+        matches = [d for d in store.devices() if d["name"].lower() == name or d["id"] == name]
+        if len(matches) != 1:
+            say("Name one paired phone exactly, as `toby phone devices` lists it.")
+            return 1
+        store.revoke(matches[0]["id"])
+        say(f"{matches[0]['name']} is unpaired.")
+        return 0
+
+    say(f"phone connection: {'on' if settings.get('remote_enabled') else 'off'}")
+    say(f"tailscale: {tailscale_name() or 'not set up'}")
+    say(f"paired phones: {len(remote_bridge.DeviceStore().devices())}")
     return 0
 
 

@@ -103,7 +103,8 @@ button, input { font: inherit; }
 }
 #steps li.current { color: var(--ink-bright); font-weight: 600; }
 #steps li.current::before { border: none; background: var(--accent); box-shadow: 0 0 0 5px rgba(90, 140, 255, 0.22); animation: pulse 1.4s infinite; }
-#steps li.done { color: var(--ink-quiet); text-decoration: line-through; }
+#steps li.done { color: var(--ink-quiet); }
+#steps li.done .label { text-decoration: line-through; }
 #steps li.done::before { border: none; background: var(--ok); }
 #steps li.error { color: var(--alert); }
 #steps li.error::before { border-color: var(--alert); }
@@ -156,3 +157,17 @@ input::placeholder { color: var(--ink-quiet); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before { animation: none !important; transition: none !important; }
 }
+
+/* -- task state, approvals, pairing (device pairing and permission levels) -- */
+.state { font-size: 12px; color: var(--ink-quiet); letter-spacing: .02em; }
+.state.needs_permission, .state.failed { color: var(--warn, #f3c969); }
+.task-actions { margin-top: 12px; justify-content: flex-end; }
+#steps li { flex-wrap: wrap; }
+#steps li .detail { flex-basis: 100%; padding-left: 26px; font-size: 12px; color: var(--ink-quiet); margin-top: 2px; text-decoration: none; display: inline-block; }
+.eyebrow { font-size: 12px; color: var(--ink-quiet); margin: 0 0 4px; text-transform: uppercase; letter-spacing: .06em; }
+#confirm-text { font-weight: 600; }
+#confirm-details { margin: 8px 0 0; padding-left: 18px; color: var(--ink-quiet); font-size: 13px; }
+.reason { color: #ff8080; font-size: 13px; }
+.confirm.restricted { border-color: rgba(255, 128, 128, .45); }
+.pair-status { margin-top: 12px; font-size: 14px; }
+.pair-status .compare { display: block; font-size: 28px; font-weight: 700; letter-spacing: .12em; margin: 6px 0; }

@@ -215,56 +215,91 @@ if win is not None:
         app.screen_control.deny()
 
 # -- the Yes/No row is shared, and must never strand a waiting thread ------
+def _pump_until(until, seconds=3.0):
+    import time as _t
+    end = _t.monotonic() + seconds
+    ctx = GLib.MainContext.default()
+    while _t.monotonic() < end:
+        while ctx.iteration(False):
+            pass
+        if until():
+            return True
+        _t.sleep(0.01)
+    return False
+
+
 if win is not None:
+    import threading as _threading
     try:
         app.screen_control.deny()
+        win._pinch_cursor_armed = False
 
-        # An action that needs consent blocks a background thread on this
-        # event until the row is answered.
-        win._action_confirm_pending = True
-        win._confirm_event.clear()
+        # An action that needs consent blocks a background thread until the
+        # row (or a phone) answers it.
+        answer = {}
+        waiter = _threading.Thread(target=lambda: answer.setdefault("v", win._await_confirmation()))
+        waiter.start()
+        if not _pump_until(lambda: win.confirm_row.get_visible()):
+            errors.append("an action that needs permission never asked")
+        if "mouse and keyboard" not in win.confirm_label.get_text():
+            errors.append(f"the row asks the wrong thing: {win.confirm_label.get_text()!r}")
 
-        # Meanwhile the user flips the hand-pointing switch. It must not take
-        # the question over, because the blocked thread is waiting on it.
+        # Meanwhile the user flips the hand-pointing switch. Its question
+        # waits its turn; it doesn't replace the one the thread is blocked on.
         win._arm_pinch_cursor()
-        if win._pending_confirm_purpose == "pinch_cursor":
+        _pump_until(lambda: len(win.approvals.pending()) == 2)
+        if "mouse and keyboard" not in win.confirm_label.get_text():
             errors.append("hand pointing hijacked a confirmation an action was waiting on")
 
         win.on_confirm_yes()
-        if not win._confirm_event.is_set():
+        waiter.join(3)
+        if waiter.is_alive():
             errors.append("answering the confirmation left the waiting thread blocked")
-        if win._confirm_result is not True:
+        if answer.get("v") is not True or not app.screen_control.enabled:
             errors.append("answering yes did not record a yes")
 
-        # And with nothing waiting, the same row does ask for hand pointing.
+        # then the hand-pointing question comes up, and a no leaves it off
         app.screen_control.deny()
-        win._action_confirm_pending = False
-        win._pinch_cursor_armed = False
-        win._arm_pinch_cursor()
-        if win._pending_confirm_purpose != "pinch_cursor":
-            errors.append("hand pointing did not ask for mouse permission")
+        if not _pump_until(lambda: "hand" in win.confirm_label.get_text()):
+            errors.append("hand pointing's question never came up after the first was answered")
         if win._pinch_cursor_armed:
             errors.append("hand pointing armed itself before permission was given")
-
         win.on_confirm_no()
+        _pump_until(lambda: not win.confirm_row.get_visible())
         if win._pinch_cursor_armed:
             errors.append("hand pointing armed itself after permission was refused")
         if win.settings_pinch_cursor_switch.get_active():
             errors.append("refusing permission left the hand-pointing switch on")
+        if win.confirm_row.get_visible():
+            errors.append("the row stayed up with nothing left to answer")
 
         # saying yes to that same question does arm it
-        win._pinch_cursor_armed = False
         win._arm_pinch_cursor()
+        _pump_until(lambda: win.confirm_row.get_visible())
         win.on_confirm_yes()
-        if not win._pinch_cursor_armed:
+        if not _pump_until(lambda: win._pinch_cursor_armed):
             errors.append("granting permission did not arm hand pointing")
         win._disarm_pinch_cursor()
+
+        # a cancelled task's question counts as no, and the row goes away
+        app.screen_control.deny()
+        win.task_cancelled = False
+        answer.clear()
+        waiter = _threading.Thread(target=lambda: answer.setdefault("v", win._await_confirmation()))
+        waiter.start()
+        _pump_until(lambda: win.confirm_row.get_visible())
+        win.task_cancelled = True
+        waiter.join(3)
+        _pump_until(lambda: not win.confirm_row.get_visible())
+        if answer.get("v") is not False:
+            errors.append("cancelling the task didn't answer its question with no")
+        if win.confirm_row.get_visible():
+            errors.append("a cancelled question stayed on screen")
+        win.task_cancelled = False
     except Exception:
         errors.append("shared confirmation row: " + traceback.format_exc())
     finally:
         app.screen_control.deny()
-        win._action_confirm_pending = False
-        win._pending_confirm_purpose = None
 
 # -- the face: tap squash, desktop glances, thinking motes, fade out --------
 if win is not None:

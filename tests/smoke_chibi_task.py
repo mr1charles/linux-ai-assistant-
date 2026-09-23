@@ -256,47 +256,169 @@ try:
         errors.append(f"the fast path reply didn't show: {win.answer.get_text()!r}")
     pump(8, until=lambda: not win.chibi_director.visible)
 
-    # -- a request from the phone, end to end over HTTP ----------------------
+    # -- a phone, end to end over HTTP: pair, ask, approve, get the answer ------
     import json as _json
+    import urllib.error as _urlerr
     import urllib.request as _url
     calls.clear()
     if win.remote is None:
         errors.append("the phone bridge didn't start with remote_enabled on")
     else:
         rhost, rport = win.remote.address
-        token = win.remote.token
+        token = {"v": ""}
 
-        def phone(path, body=None):
+        def phone(path, body=None, auth=True):
             req = _url.Request(f"http://{rhost}:{rport}{path}",
                                data=None if body is None else _json.dumps(body).encode(),
                                method="GET" if body is None else "POST")
-            req.add_header("Authorization", "Bearer " + token)
+            if auth:
+                req.add_header("Authorization", "Bearer " + token["v"])
             req.add_header("Content-Type", "application/json")
-            with _url.urlopen(req, timeout=5) as r:
-                return _json.loads(r.read())
+            try:
+                with _url.urlopen(req, timeout=25) as r:
+                    return _json.loads(r.read())
+            except _urlerr.HTTPError as e:
+                return {"http_error": e.code}
 
-        replies = {}
-        t = threading.Thread(target=lambda: replies.setdefault("ask", phone("/api/ask", {"text": "open youtube and tiktok"})))
-        t.start()
+        def in_background(fn):
+            box = {}
+            t = threading.Thread(target=lambda: box.setdefault("v", fn()))
+            t.start()
+            return t, box
+
+        # pairing: a code from the computer, a claim from the phone, and a yes
+        # given here, on the computer's own Yes button
+        session = win.remote.pairing.start("https://test.tail.ts.net")
+        t, claim = in_background(lambda: phone("/api/pair/claim", {
+            "code": session["code"], "device_name": "Test iPhone", "device_id": "test-iphone-0001",
+            "platform": "ios"}, auth=False))
         pump(3, until=lambda: not t.is_alive())
-        if not replies.get("ask", {}).get("ok"):
-            errors.append(f"the phone's request was refused: {replies}")
+        claim = claim.get("v", {})
+        if not pump(3, until=lambda: "Pair Test iPhone" in win.confirm_label.get_text()):
+            errors.append(f"the computer didn't ask before pairing: {win.confirm_label.get_text()!r}")
+        if claim.get("compare", "x")[:3] not in win.confirm_label.get_tooltip_text() or "":
+            errors.append("the computer's prompt doesn't show the number to compare")
+        if win.remote.board.snapshot().get("approvals"):
+            errors.append("a pairing question was offered to phones")
+        t, result = in_background(lambda: phone(f"/api/pair/wait?claim={claim.get('claim')}", auth=False))
+        pump(0.3)
+        win.on_confirm_yes()
+        pump(5, until=lambda: not t.is_alive())
+        token["v"] = result.get("v", {}).get("token", "")
+        if not token["v"]:
+            errors.append(f"pairing didn't hand the phone a token: {result}")
+
+        # an ordinary request, straight through
+        t, asked = in_background(lambda: phone("/api/ask", {"text": "open youtube and tiktok"}))
+        pump(3, until=lambda: not t.is_alive())
+        if not asked.get("v", {}).get("ok"):
+            errors.append(f"the phone's request was refused: {asked}")
         pump(12, until=lambda: not win._busy and len(calls) >= 2)
         pump(0.5)
         if calls != [("open", "https://www.youtube.com"), ("open", "https://www.tiktok.com")]:
-            errors.append(f"the phone's request didn't run on the laptop: {calls}")
-        holder = {}
-        t = threading.Thread(target=lambda: holder.setdefault("s", phone("/api/state")))
-        t.start()
+            errors.append(f"the phone's request didn't run on the computer: {calls}")
+        t, holder = in_background(lambda: phone("/api/state"))
         pump(3, until=lambda: not t.is_alive())
-        state = holder.get("s", {})
+        state = holder.get("v", {})
         if state.get("reply") != "Opening YouTube and TikTok.":
             errors.append(f"the phone didn't get the reply: {state.get('reply')!r}")
-        if [st["status"] for st in state.get("steps", [])] != ["done", "done"]:
-            errors.append(f"the phone didn't see both steps done: {state.get('steps')}")
+        if [st["status"] for st in (state.get("task") or {}).get("steps", [])] != ["done", "done"]:
+            errors.append(f"the phone didn't see both steps done: {state.get('task')}")
+        if (state.get("task") or {}).get("state") != "completed":
+            errors.append(f"the task isn't marked completed: {(state.get('task') or {}).get('state')}")
         if state.get("busy"):
             errors.append("the phone still thinks Toby is busy")
         pump(8, until=lambda: not win.chibi_director.visible)
+
+        # a task that runs a command: it asks the phone first, then reads the
+        # command's real output before answering
+        project = os.path.join(os.environ["HOME"], "project")
+        os.makedirs(project, exist_ok=True)
+        prompts = []
+
+        def scripted_think(instruction, history, on_chunk=None, cancel_check=None):
+            prompts.append(instruction)
+            if len(prompts) == 1:
+                return {"actions": [{"tool": "run_command", "command": "echo compiling; echo build ok",
+                                     "cwd": "~/project"}], "reply": "Checking.", "mood": "neutral"}
+            return {"actions": [], "reply": "The build passed.", "mood": "happy"}
+        app.think = scripted_think
+        t, asked = in_background(lambda: phone("/api/ask", {"text": "check if my project builds"}))
+        pump(3, until=lambda: not t.is_alive())
+        task_id = asked.get("v", {}).get("task_id")
+        pump(10, until=lambda: bool(win.remote.board.snapshot().get("approvals")))
+        pending = win.remote.board.snapshot().get("approvals") or []
+        if not pending or "echo compiling" not in pending[0]["title"]:
+            errors.append(f"running a command didn't ask the phone first: {pending}")
+        else:
+            state = win.remote.board.snapshot()
+            if (state.get("task") or {}).get("state") != "needs_permission":
+                errors.append(f"the task isn't shown as needing permission: {(state.get('task') or {}).get('state')}")
+            if not any(e["kind"] == "needs_permission" for e in win.remote.events.since(0)):
+                errors.append("the phone wasn't notified that Toby needs permission")
+            t, answered = in_background(lambda: phone("/api/approve", {"id": pending[0]["id"], "allow": True}))
+            pump(3, until=lambda: not t.is_alive())
+            if not answered.get("v", {}).get("ok"):
+                errors.append(f"the phone's yes wasn't accepted: {answered}")
+        pump(15, until=lambda: not win._busy)
+        pump(0.5)
+        if len(prompts) != 2 or "build ok" not in prompts[-1]:
+            errors.append("Toby didn't read the command's real output before answering")
+        t, detail = in_background(lambda: phone(f"/api/tasks/{task_id}"))
+        pump(3, until=lambda: not t.is_alive())
+        detail = detail.get("v", {})
+        if detail.get("state") != "completed" or detail.get("reply") != "The build passed.":
+            errors.append(f"the task record is wrong: {detail.get('state')}, {detail.get('reply')!r}")
+        if not detail.get("origin", "").startswith("phone:Test iPhone"):
+            errors.append(f"the task doesn't say it came from the phone: {detail.get('origin')}")
+        run_step = next((st for st in detail.get("steps", []) if st["label"].startswith("Run")), {})
+        if run_step.get("status") != "done" or "finished successfully" not in run_step.get("detail", ""):
+            errors.append(f"the step doesn't carry what happened: {run_step}")
+        if not detail.get("job_details") or detail["job_details"][0]["state"] != "succeeded":
+            errors.append(f"the command's job isn't attached to the task: {detail.get('job_details')}")
+        if not any(e["kind"] == "task_done" for e in win.remote.events.since(0)):
+            errors.append("the phone wasn't told the task finished")
+
+        # a no from the phone stops the task and nothing runs
+        prompts.clear()
+        marker = os.path.join(project, "should-not-exist")
+
+        def refused_think(instruction, history, on_chunk=None, cancel_check=None):
+            prompts.append(instruction)
+            return {"actions": [{"tool": "write_file", "path": "~/project/should-not-exist", "content": "x"}],
+                    "reply": "Writing it.", "mood": "neutral"}
+        app.think = refused_think
+        t, asked = in_background(lambda: phone("/api/ask", {"text": "write a file"}))
+        pump(3, until=lambda: not t.is_alive())
+        pump(10, until=lambda: bool(win.remote.board.snapshot().get("approvals")))
+        pending = win.remote.board.snapshot().get("approvals") or []
+        if pending:
+            t, _ = in_background(lambda: phone("/api/approve", {"id": pending[0]["id"], "allow": False}))
+            pump(3, until=lambda: not t.is_alive())
+        pump(10, until=lambda: not win._busy)
+        if os.path.exists(marker):
+            errors.append("a file was written after the phone said no")
+
+        # restricted: refused outright, no question asked
+        def restricted_think(instruction, history, on_chunk=None, cancel_check=None):
+            return {"actions": [{"tool": "run_command", "command": "sudo rm -rf /"}],
+                    "reply": "Done.", "mood": "neutral"}
+        app.think = restricted_think
+        t, asked = in_background(lambda: phone("/api/ask", {"text": "wipe everything"}))
+        pump(3, until=lambda: not t.is_alive())
+        pump(10, until=lambda: not win._busy)
+        record = app.TASKS.get(asked.get("v", {}).get("task_id"))
+        step = (record or {}).get("steps", [{}])[0]
+        if step.get("status") != "error" or "Restricted" not in step.get("detail", ""):
+            errors.append(f"a restricted command wasn't refused with a reason: {step}")
+
+        # logging out from the phone unpairs it
+        t, _ = in_background(lambda: phone("/api/logout", {}))
+        pump(3, until=lambda: not t.is_alive())
+        t, after = in_background(lambda: phone("/api/state"))
+        pump(3, until=lambda: not t.is_alive())
+        if after.get("v", {}).get("http_error") != 401:
+            errors.append("the phone still worked after logging out")
         win.remote.stop()
 
     print(f"a mid-task frame is at {workdir}/chibi_mid_task.png" if frame_saved[0]
