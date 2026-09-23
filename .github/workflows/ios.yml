@@ -10,6 +10,7 @@ on:
       - "scripts/remote_bridge.py"
       - "scripts/computer_tools.py"
       - ".github/workflows/ios.yml"
+      - "VERSION"
   workflow_dispatch:
 
 defaults:
@@ -29,19 +30,7 @@ jobs:
       - name: Generate the Xcode project
         run: cd ios && xcodegen generate
       - name: Build the unsigned IPA
-        run: |
-          cd ios
-          xcodebuild -project LittleToby.xcodeproj -scheme LittleToby -configuration Release \
-            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/release \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 60
-          mkdir -p Payload
-          cp -R build/release/Build/Products/Release-iphoneos/LittleToby.app Payload/
-          zip -qry LittleToby-unsigned.ipa Payload
-          echo "== what was built =="
-          ls -la LittleToby-unsigned.ipa
-          file Payload/LittleToby.app/LittleToby
-          du -sh Payload/LittleToby.app
-          plutil -p Payload/LittleToby.app/Info.plist | head -40
+        run: ios/ci/build_ipa.sh "$(tr -d '[:space:]' < VERSION)"
       - uses: actions/upload-artifact@v4
         with:
           name: LittleToby-unsigned-ipa

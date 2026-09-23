@@ -355,8 +355,10 @@ running?", "run the tests in ~/project", "open Claude Code in my project",
 phone shows the task live: each step as it happens, what it found, anything
 waiting for your OK, and the reply.
 
-There's a native iPhone app (see [docs/COMPANION.md](docs/COMPANION.md) for
-installing it) and a web app for Android or any browser. Both pair the
+There's a native iPhone app (download it from the
+[latest release](https://github.com/mr1charles/linux-ai-assistant-/releases/latest);
+[docs/COMPANION.md](docs/COMPANION.md) explains installing it) and a web
+app for Android or any browser. Both pair the
 same way:
 
 ```bash
@@ -583,6 +585,13 @@ look on the real machine.
 
 `tests/run.sh` points `HOME` at a throwaway directory seeded with sample
 data, so it never reads or writes your real notes, history or settings.
+
+### Releases
+
+The version is in `VERSION`. To make a release, put the new number there,
+write what changed in `docs/releases/<version>.md`, and merge to `main`.
+The Release workflow then tags it `v<version>`, publishes the notes, and
+attaches the iPhone app as an unsigned IPA built on a GitHub Mac.
 
 ## License
 

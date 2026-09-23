@@ -1,0 +1,76 @@
+name: Release
+
+# Publishes a GitHub release whenever VERSION changes on main:
+#   - the tag v<VERSION> on that commit
+#   - the notes in docs/releases/<VERSION>.md
+#   - the iPhone app, as an unsigned IPA (you sign it with your own Apple ID
+#     when you sideload it, see docs/COMPANION.md)
+# The computer side installs straight from the repository (`toby update`, or
+# the one-line installer), so there's nothing else to attach.
+#
+# To make a release: put the new number in VERSION, write its notes in
+# docs/releases/<VERSION>.md, and merge to main. Running this again for the
+# same version replaces the IPA and the notes; it never moves the tag.
+on:
+  push:
+    branches: [main]
+    paths: [VERSION]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: version
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "VERSION should look like 1.2.3, not '$version'"; exit 1
+          fi
+          if [ ! -s "docs/releases/$version.md" ]; then
+            echo "Write the release notes first: docs/releases/$version.md"; exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+      - name: Build the unsigned IPA
+        run: |
+          ios/ci/build_ipa.sh "${{ steps.version.outputs.version }}"
+          built="$(plutil -extract CFBundleShortVersionString raw ios/Payload/LittleToby.app/Info.plist)"
+          if [ "$built" != "${{ steps.version.outputs.version }}" ]; then
+            echo "The app says it's version $built, not ${{ steps.version.outputs.version }}"; exit 1
+          fi
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          ipa="LittleToby-$VERSION-unsigned.ipa"
+          cp ios/LittleToby-unsigned.ipa "$ipa"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag exists: replacing its IPA and notes."
+            gh release upload "$tag" "$ipa" --clobber
+            gh release edit "$tag" --notes-file "docs/releases/$VERSION.md"
+          else
+            gh release create "$tag" "$ipa" --target "$GITHUB_SHA" \
+              --title "Little Toby $VERSION" --notes-file "docs/releases/$VERSION.md" --latest
+          fi
+          gh release view "$tag"

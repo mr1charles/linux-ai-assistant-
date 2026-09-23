@@ -126,7 +126,9 @@ Every push that changes it is built on a GitHub macOS machine (the
    finishes a task against a real Toby bridge, on a small and a large
    iPhone, in light and dark, saving screenshots.
 
-Download the IPA from the run's **Artifacts** on GitHub (Actions tab).
+Each release on the repository's **Releases** page has it attached as
+`LittleToby-<version>-unsigned.ipa`. For a build between releases, take it
+from that run's **Artifacts** (Actions tab).
 
 **It's unsigned**, because signing needs an Apple account, and iPhones only
 install signed apps. You sign it with your own Apple ID when you install it:
@@ -140,8 +142,10 @@ install signed apps. You sign it with your own Apple ID when you install it:
 With a free Apple ID, a sideloaded app must be re-signed every 7 days (the
 tools can do it automatically) and you can have 3 at once. With a paid
 Apple Developer account ($99/year) it lasts a year, and you could use
-TestFlight instead. On first launch, iOS may ask you to trust the
-developer profile: Settings → General → VPN & Device Management.
+TestFlight instead. Once it's installed, turn on **Settings → Privacy &
+Security → Developer Mode** (the phone restarts; the switch only appears
+after a sideloaded app is on the phone), then trust your Apple ID under
+**Settings → General → VPN & Device Management**.
 
 **On a Mac**, you can also build and run it yourself:
 
