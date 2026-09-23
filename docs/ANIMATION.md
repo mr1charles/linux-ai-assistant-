@@ -106,6 +106,7 @@ patterns this audit removed if they come back.
 | Typing | `begin_typing`, `draw_keyboard` | a small keyboard comes out on `quick`; each key lights under the hand typing it; the bubble fills in letter by letter |
 | Shortcuts | `press_combo`, `draw_keycaps` | keycaps appear and go down in order, 70 ms apart; the real press lands with the last |
 | Asking permission | `ask_permission` | lets go, hand to chin, looks back at the pill until you answer |
+| Work Mode's pen pointer | `draw_pen_cursor`, `ChibiDirector.set_pen` | follows the real pen; a glow while looking, a dashed outline before clicking, tilted in while drawing, a ring on a click; fades after 2.5 s idle |
 | Mouse glides Toby makes | `screen_control.move` | time-based: `move` normally, `carry` at walking pace while the chibi holds it |
 | Lid close and open | `fold_effect.py`, `toby_fold.py` | compress, lean, fold to the hinge, black; the reverse on waking |
 | Shutdown | `toby_fold.py` | the desktop fades to black |
