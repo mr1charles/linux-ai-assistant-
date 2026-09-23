@@ -3,6 +3,7 @@ import SwiftUI
 struct HomeView: View {
     @Environment(AppModel.self) private var model
     @State private var speech = SpeechRecognizer()
+    @State private var pairing = false
     @AppStorage("toby.voice.autosend") private var autoSend = true
 
     var body: some View {
@@ -18,7 +19,7 @@ struct HomeView: View {
                     .accessibilityHint("Tap to talk to Toby")
                     headline
                     if model.connection.isProblem {
-                        ConnectionCard(connection: model.connection)
+                        ConnectionCard(connection: model.connection, pair: { pairing = true })
                             .transition(.arrive)
                     }
                     if let approval = model.approvals.first {
@@ -45,6 +46,7 @@ struct HomeView: View {
             .refreshable { await model.refreshStatus() }
             .navigationDestination(for: String.self) { id in TaskDetailView(taskID: id) }
             .toolbar(.hidden, for: .navigationBar)
+            .sheet(isPresented: $pairing) { PairingView() }
         }
     }
 
@@ -172,7 +174,7 @@ struct ConnectionPill: View {
 struct ConnectionCard: View {
     @Environment(AppModel.self) private var model
     var connection: Connection
-    @State private var pairing = false
+    var pair: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -183,7 +185,7 @@ struct ConnectionCard: View {
                 .font(.subheadline)
                 .foregroundStyle(Theme.inkNormal)
             if connection == .unpaired {
-                Button("Pair again") { pairing = true }
+                Button("Pair again", action: pair)
                     .buttonStyle(TobyButtonStyle())
             } else if connection != .phoneOffline {
                 Button("Try again") { model.reconnect() }
@@ -191,7 +193,6 @@ struct ConnectionCard: View {
             }
         }
         .card()
-        .sheet(isPresented: $pairing) { PairingView() }
         .accessibilityIdentifier("home.connectionCard")
     }
 

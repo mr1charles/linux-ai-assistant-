@@ -18,8 +18,14 @@ while IFS= read -r line; do [ -n "$line" ] && DEVICES+=("$line"); done < <(pytho
 echo "Simulators:"; printf '  %s\n' "${DEVICES[@]}"
 if [ "${#DEVICES[@]}" -eq 0 ]; then echo "no iPhone simulators on this machine"; exit 1; fi
 
+# Show progress as it happens (errors, each test case, results) and keep the
+# full log in build/.
+show() { grep -E --line-buffered "error:|warning: unable|Test Case|Test Suite .*(passed|failed)|Executed|\*\* |Testing started|Failing tests|XCTAssert|failed \(" || true; }
+
+echo "== building for testing =="
 xcodebuild build-for-testing -project LittleToby.xcodeproj -scheme LittleToby \
-  -destination "id=${DEVICES[0]%% *}" -derivedDataPath build/dd CODE_SIGNING_ALLOWED=NO | tail -n 25
+  -destination "id=${DEVICES[0]%% *}" -derivedDataPath build/dd CODE_SIGNING_ALLOWED=NO \
+  2>&1 | tee build/build-for-testing.log | show
 
 status=0
 first=1
@@ -30,12 +36,20 @@ for device in "${DEVICES[@]}"; do
     if [ $first -eq 1 ]; then only=""; first=0; fi   # unit tests once, with the first run
     result="build/results/${slug}-${appearance}.xcresult"
     echo "== $name, $appearance =="
+    set +e
     TEST_RUNNER_TOBY_PAIR_CODE="$TOBY_PAIR_CODE" TEST_RUNNER_TOBY_APPEARANCE="$appearance" \
     TEST_RUNNER_TOBY_SERVER="http://127.0.0.1:8765" \
     xcodebuild test-without-building -project LittleToby.xcodeproj -scheme LittleToby \
       -destination "id=$udid" -derivedDataPath build/dd -resultBundlePath "$result" $only \
       -test-timeouts-enabled YES -maximum-test-execution-time-allowance 420 \
-      | tail -n 40 || status=1
+      2>&1 | tee "build/results/${slug}-${appearance}.log" | show
+    rc=${PIPESTATUS[0]}
+    set -e
+    if [ "$rc" -ne 0 ]; then
+      status=1
+      echo "-- $name, $appearance failed (exit $rc); the end of its log: --"
+      tail -n 60 "build/results/${slug}-${appearance}.log"
+    fi
     out="build/screenshots/${slug}-${appearance}"
     mkdir -p "$out"
     xcrun xcresulttool export attachments --path "$result" --output-path "$out" >/dev/null 2>&1 \

@@ -192,7 +192,13 @@ def pair_phone(settings, port, ask=input):
     if base is None:
         say(where)
         return 1
-    status, session = remote_bridge.admin_call("/api/admin/pair/start", {"base_url": base}, port=port)
+    import time as _time
+    status, session = 0, {}
+    for _attempt in range(15):          # Toby may still be starting up
+        status, session = remote_bridge.admin_call("/api/admin/pair/start", {"base_url": base}, port=port)
+        if status == 200:
+            break
+        _time.sleep(1)
     if status != 200:
         say("Couldn't reach the running Toby to start pairing. Is it running? Try: toby start")
         return 1
@@ -246,8 +252,6 @@ def cmd_phone(args):
             say("For anywhere-access, install Tailscale on the computer and phone and run: sudo tailscale up")
         run(["systemctl", "--user", "restart", "toby.service"])
         say("The phone connection is on.")
-        import time as _time
-        _time.sleep(2)   # give Toby a moment to come back up
         return cmd_phone(["pair"])
 
     if action == "off":

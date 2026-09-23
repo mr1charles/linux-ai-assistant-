@@ -3,15 +3,20 @@ import SwiftUI
 struct RootView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.scenePhase) private var scenePhase
+    // Presented from here, not from the welcome screen: pairing the first
+    // computer replaces the welcome screen, and the sheet (with its "Paired"
+    // confirmation) has to outlive that.
+    @State private var pairingFirst = false
 
     var body: some View {
         Group {
             if model.computers.computers.isEmpty {
-                WelcomeView()
+                WelcomeView(pair: { pairingFirst = true })
             } else {
                 MainTabs()
             }
         }
+        .sheet(isPresented: $pairingFirst) { PairingView() }
         .animation(Motion.gentle, value: model.computers.computers.isEmpty)
         .onAppear { model.startPolling() }
         .onChange(of: scenePhase) { _, phase in

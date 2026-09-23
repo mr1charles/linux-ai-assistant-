@@ -151,6 +151,7 @@ struct StatusCard: View {
             }
         }
         .card()
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("home.status")
     }
 

@@ -3,7 +3,7 @@ import UIKit
 
 /// The first thing you see: what Little Toby is, and pairing a computer.
 struct WelcomeView: View {
-    @State private var pairing = false
+    var pair: () -> Void
 
     var body: some View {
         VStack(spacing: 20) {
@@ -23,7 +23,7 @@ struct WelcomeView: View {
             }
             .padding(.horizontal, 8)
             Spacer()
-            Button("Pair a computer") { pairing = true }
+            Button("Pair a computer", action: pair)
                 .buttonStyle(TobyButtonStyle())
                 .accessibilityIdentifier("welcome.pair")
             Text("You'll need Little Toby running on the computer, with its phone connection on (toby phone on).")
@@ -31,7 +31,6 @@ struct WelcomeView: View {
         }
         .padding(24)
         .background(Theme.background.ignoresSafeArea())
-        .sheet(isPresented: $pairing) { PairingView() }
     }
 }
 

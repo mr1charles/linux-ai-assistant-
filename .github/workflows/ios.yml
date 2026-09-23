@@ -60,3 +60,11 @@ jobs:
         with:
           name: screenshots
           path: ios/build/screenshots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-logs
+          path: |
+            ios/build/results/*.log
+            ios/build/build-for-testing.log
+            ios/build/test-desktop.log
