@@ -1,0 +1,59 @@
+# Little Toby for iPhone. Generate the Xcode project with XcodeGen:
+#   brew install xcodegen && cd ios && xcodegen generate
+# then open LittleToby.xcodeproj. See docs/COMPANION.md for building an IPA.
+name: LittleToby
+options:
+  bundleIdPrefix: com.littletoby
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  LittleToby:
+    type: application
+    platform: iOS
+    sources:
+      - path: LittleToby
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.littletoby.app
+        PRODUCT_NAME: LittleToby
+        INFOPLIST_FILE: LittleToby/Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+    scheme:
+      testTargets:
+        - LittleTobyTests
+        - LittleTobyUITests
+      gatherCoverageData: false
+  LittleTobyTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LittleTobyTests
+    dependencies:
+      - target: LittleToby
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.littletoby.app.tests
+  LittleTobyUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: LittleTobyUITests
+    dependencies:
+      - target: LittleToby
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.littletoby.app.uitests
+        TEST_TARGET_NAME: LittleToby

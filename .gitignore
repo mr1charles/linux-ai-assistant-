@@ -31,3 +31,10 @@ remote.tmp
 
 # Toby's private Python environment (install.sh creates it)
 .venv/
+
+# iPhone app build output (the Xcode project is generated from ios/project.yml)
+ios/build/
+ios/Payload/
+ios/*.ipa
+ios/*.zip
+ios/LittleToby.xcodeproj/

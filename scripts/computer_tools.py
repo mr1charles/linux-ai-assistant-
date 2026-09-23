@@ -565,14 +565,15 @@ def open_terminal(cwd="~", command=""):
     return f"Opened a terminal in {permissions.pretty(where)}" + (f" running {command}." if command else ".")
 
 
-def run_command(jobs, command, cwd="~", background=False, wait_s=45, task_id=None, cancel_check=None):
+def run_command(jobs, command, cwd="~", background=False, wait_s=45, task_id=None, cancel_check=None,
+                name=None):
     """Run a shell command as a job. In the foreground, wait up to wait_s for
     it; if it's still going then, it carries on as a background job. If the
     task is cancelled while waiting, the command is stopped."""
     where = permissions.expand(cwd)
     if not where.is_dir():
         return f"{permissions.pretty(where)} isn't a folder.", None
-    job = jobs.start(command, str(where), task_id=task_id)
+    job = jobs.start(command, str(where), name=name, task_id=task_id)
     if background:
         return f"Started '{job.name}' in the background (job {job.id}).", job
     deadline = time.monotonic() + wait_s

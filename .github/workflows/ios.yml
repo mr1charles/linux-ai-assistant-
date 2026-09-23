@@ -1,0 +1,53 @@
+name: iPhone app
+
+# Builds Little Toby for iPhone on a GitHub macOS machine: an unsigned IPA
+# (sideload it with your own Apple ID, see docs/COMPANION.md), plus unit and
+# UI tests against a real Toby bridge with screenshots in light and dark.
+on:
+  push:
+    paths:
+      - "ios/**"
+      - "scripts/remote_bridge.py"
+      - "scripts/computer_tools.py"
+      - ".github/workflows/ios.yml"
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+      - name: Generate the Xcode project
+        run: cd ios && xcodegen generate
+      - name: Build the unsigned IPA
+        run: |
+          cd ios
+          xcodebuild -project LittleToby.xcodeproj -scheme LittleToby -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build/release \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build | tail -n 60
+          mkdir -p Payload
+          cp -R build/release/Build/Products/Release-iphoneos/LittleToby.app Payload/
+          zip -qry LittleToby-unsigned.ipa Payload
+          ls -la LittleToby-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LittleToby-unsigned-ipa
+          path: ios/LittleToby-unsigned.ipa
+      - name: Xcode project (for opening on a Mac)
+        run: cd ios && zip -qry LittleToby-xcodeproj.zip LittleToby.xcodeproj
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LittleToby-xcodeproj
+          path: ios/LittleToby-xcodeproj.zip
+      - name: Unit and UI tests against a real Toby
+        run: ios/ci/run_tests.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots
+          path: ios/build/screenshots
