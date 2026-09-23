@@ -71,7 +71,7 @@ mkdir -p "$DATA_DIR"
 if ! command -v pacman >/dev/null; then
   warn "This installer is for Arch-based systems (pacman). Install these yourself:"
   warn "  python gtk3 python-gobject gtk-layer-shell python-cairo python-requests"
-  warn "  espeak-ng ollama ydotool grim tesseract tesseract-data-eng qrencode"
+  warn "  espeak-ng ollama ydotool grim tesseract tesseract-data-eng qrencode python-evdev at-spi2-core"
   warn "then run this again with SKIP_SYSTEM_PACKAGES=1."
   [ -n "${SKIP_SYSTEM_PACKAGES:-}" ] || exit 1
 fi
@@ -80,7 +80,8 @@ if [ -z "${SKIP_SYSTEM_PACKAGES:-}" ] && command -v pacman >/dev/null; then
   step "Installing system packages (asks for your password once)"
   # Deliberately lean: nothing here pulls in scipy, pandas or the like.
   PKGS=(python python-pip gtk3 python-gobject gtk-layer-shell python-cairo python-requests
-        espeak-ng ydotool grim tesseract tesseract-data-eng qrencode unzip curl git)
+        espeak-ng ydotool grim tesseract tesseract-data-eng qrencode unzip curl git
+        python-evdev at-spi2-core)
   # ollama: use the GPU build if there's an NVIDIA card, plain otherwise
   if lspci 2>/dev/null | grep -qi nvidia; then PKGS+=(ollama-cuda); else PKGS+=(ollama); fi
   [ "$PHONE" = 1 ] && PKGS+=(tailscale)

@@ -54,6 +54,7 @@ def check_python(r):
         ("sounddevice", "pip: sounddevice (Voice Mode only)", False),
         ("mediapipe", "pip: mediapipe (Camera Mode only)", False),
         ("cv2", "pip: opencv-python (Camera Mode only)", False),
+        ("evdev", "python-evdev (Work Mode's pressure-sensitive pen; without it, the mouse draws)", False),
     ]
     for module, package, required in needed:
         try:

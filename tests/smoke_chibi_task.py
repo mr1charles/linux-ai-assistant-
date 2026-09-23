@@ -421,6 +421,90 @@ try:
             errors.append("the phone still worked after logging out")
         win.remote.stop()
 
+    # -- Work Mode, through the app: look, circle a number, check it took ------
+    import shutil as _shutil
+    if _shutil.which("tesseract"):
+        import vision as _vision
+        import stylus as _stylus
+        page = cairo.ImageSurface(cairo.FORMAT_RGB24, 1280, 1024)
+        pc = cairo.Context(page)
+        pc.set_source_rgb(1, 1, 1)
+        pc.paint()
+        pc.set_source_rgb(0, 0, 0)
+        pc.select_font_face("DejaVu Sans")
+        pc.set_font_size(24)
+        pc.move_to(120, 200)
+        pc.show_text("Total due: 42.50")
+        shots_dir = tempfile.mkdtemp()
+
+        def fake_capture(size, runner=None):
+            path = os.path.join(shots_dir, f"s{len(os.listdir(shots_dir))}.png")
+            page.write_to_png(path)
+            return path, size[0] / 1280
+
+        class InkPen(_stylus.Pen):
+            name = "pen"
+            last = None
+            def hover(self, x, y): self.last = None
+            def down(self, x, y, pressure=0.8): self.last = (x, y)
+            def up(self, x, y): self.last = None
+            def move(self, x, y, pressure=0.8):
+                if self.last:
+                    c = cairo.Context(page)
+                    c.set_source_rgb(0.9, 0.1, 0.1)
+                    c.set_line_width(3)
+                    c.move_to(*self.last)
+                    c.line_to(x, y)
+                    c.stroke()
+                self.last = (x, y)
+
+        _vision.capture = fake_capture
+        win.work._pen = InkPen()
+        win.work.windows = lambda: []
+        _stylus.time = __import__("types").SimpleNamespace(sleep=lambda s: None)
+        app.SETTINGS["work_mode"] = True
+        app.screen_control.deny()
+        work_prompts = []
+
+        def work_think(instruction, history, on_chunk=None, cancel_check=None):
+            work_prompts.append(instruction)
+            if len(work_prompts) == 1:
+                return {"actions": [{"tool": "look_at_screen"}], "reply": "Looking.", "mood": "neutral"}
+            if len(work_prompts) == 2:
+                return {"actions": [{"tool": "draw", "shape": "circle", "target": "42.50"}],
+                        "reply": "Circling it.", "mood": "neutral"}
+            return {"actions": [], "reply": "Circled the total, 42.50.", "mood": "happy"}
+        app.think = work_think
+        pens_seen = []
+        real_set_pen = win.chibi_director.set_pen
+        win.chibi_director.set_pen = lambda *a, **k: pens_seen.append(a[2]) or real_set_pen(*a, **k)
+        win.task_label_text = "circle the total"
+        win.task_steps = [("Thinking", "current")]
+        win._busy = True
+        worker = threading.Thread(target=win.process, args=("circle the total on this worksheet",))
+        worker.start()
+        if not pump(10, until=lambda: "mouse and keyboard" in win.confirm_label.get_text()
+                    and win.confirm_row.get_visible()):
+            errors.append("Work Mode drew without asking for mouse-and-keyboard permission")
+        win.on_confirm_yes()
+        pump(30, until=lambda: not worker.is_alive())
+        pump(0.5)
+        if "Total due: 42.50" not in work_prompts[1] if len(work_prompts) > 1 else True:
+            errors.append("Toby didn't get to read the screen before acting")
+        if len(work_prompts) < 3 or "page changed there" not in work_prompts[2]:
+            errors.append(f"the drawing wasn't checked and reported back: {work_prompts[2:] or work_prompts}")
+        if win.answer.get_text() != "Circled the total, 42.50.":
+            errors.append(f"the Work Mode reply didn't show: {win.answer.get_text()!r}")
+        if not {"thinking", "drawing"} <= set(pens_seen):
+            errors.append(f"Toby's pen cursor didn't show looking and drawing: {sorted(set(pens_seen))}")
+        if win.chibi_director.visible:
+            errors.append("the walking chibi came out in Work Mode, where the pen does the work")
+        page.write_to_png(os.path.join(workdir, "work_mode_page.png"))
+        app.SETTINGS["work_mode"] = False
+        app.screen_control.deny()
+    else:
+        print("(tesseract not installed: skipped Work Mode through the app)")
+
     print(f"a mid-task frame is at {workdir}/chibi_mid_task.png" if frame_saved[0]
           else "no mid-task frame captured")
 except Exception:

@@ -409,6 +409,18 @@ and you can unpair any phone from the computer (`toby phone devices`,
 by logging out on the phone itself. `toby phone reset` unpairs them all;
 `toby phone off` turns the whole thing off.
 
+## Work Mode
+
+For work that only exists on the screen (marking up a PDF in Kami, a form,
+a canvas, an app with no other way in), Work Mode lets Toby work the way a
+person would. It looks at the screen, finds things by their words or a
+control's name, and clicks, drags, scrolls, circles, underlines,
+highlights, ticks and writes by hand with a real pen: a virtual
+pressure-sensitive tablet, or a mouse drag. Then it checks the screen
+changed where it acted, and says plainly when it didn't. Turn it on in
+Settings, from the iPhone app, or by asking. See
+[docs/WORK_MODE.md](docs/WORK_MODE.md).
+
 ## Fingerprint approval
 
 In Settings, **Approve permission prompts with your fingerprint** lets a

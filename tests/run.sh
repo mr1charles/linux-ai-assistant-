@@ -70,6 +70,16 @@ timeout 120 "$PY" tests/test_remote_tasks.py || status=1
 echo "== screen view and notifications =="
 "$PY" tests/test_screen_notify.py || status=1
 
+echo "== work mode: strokes, pens, seeing the screen =="
+timeout 300 "$PY" tests/test_work_mode.py || status=1
+
+echo "== work mode: reading controls through accessibility =="
+if command -v dbus-run-session >/dev/null && command -v xvfb-run >/dev/null; then
+  timeout 120 dbus-run-session -- xvfb-run -a "$PY" tests/test_accessibility.py 2>/dev/null || status=1
+else
+  echo "skipped: needs dbus-run-session and xvfb-run"
+fi
+
 echo "== phone app in a real browser =="
 timeout 180 "$PY" tests/browser_phone_app.py || status=1
 

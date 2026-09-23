@@ -12,6 +12,10 @@ on:
       - ".github/workflows/ios.yml"
   workflow_dispatch:
 
+defaults:
+  run:
+    shell: bash      # with -o pipefail, so a failure can't hide behind "| tail"
+
 jobs:
   ios:
     runs-on: macos-15
@@ -33,7 +37,11 @@ jobs:
           mkdir -p Payload
           cp -R build/release/Build/Products/Release-iphoneos/LittleToby.app Payload/
           zip -qry LittleToby-unsigned.ipa Payload
+          echo "== what was built =="
           ls -la LittleToby-unsigned.ipa
+          file Payload/LittleToby.app/LittleToby
+          du -sh Payload/LittleToby.app
+          plutil -p Payload/LittleToby.app/Info.plist | head -40
       - uses: actions/upload-artifact@v4
         with:
           name: LittleToby-unsigned-ipa
@@ -45,6 +53,7 @@ jobs:
           name: LittleToby-xcodeproj
           path: ios/LittleToby-xcodeproj.zip
       - name: Unit and UI tests against a real Toby
+        timeout-minutes: 35
         run: ios/ci/run_tests.sh
       - uses: actions/upload-artifact@v4
         if: always()

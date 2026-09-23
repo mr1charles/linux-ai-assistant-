@@ -34,6 +34,7 @@ for device in "${DEVICES[@]}"; do
     TEST_RUNNER_TOBY_SERVER="http://127.0.0.1:8765" \
     xcodebuild test-without-building -project LittleToby.xcodeproj -scheme LittleToby \
       -destination "id=$udid" -derivedDataPath build/dd -resultBundlePath "$result" $only \
+      -test-timeouts-enabled YES -maximum-test-execution-time-allowance 420 \
       | tail -n 40 || status=1
     out="build/screenshots/${slug}-${appearance}"
     mkdir -p "$out"

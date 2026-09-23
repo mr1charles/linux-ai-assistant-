@@ -481,6 +481,65 @@ def draw_ripple(cr, x, y, t, button="left", accent=(0.353, 0.549, 1.0)):
     cr.restore()
 
 
+def draw_pen_cursor(cr, x, y, state="normal", phase=0.0, box=None, accent=(0.353, 0.549, 1.0)):
+    """Toby's pen, with its nib on (x, y): the pointer of Work Mode.
+
+    normal     the pen, resting
+    thinking   a slow glow round the nib while Toby looks at the screen
+    selecting  a soft outline round the thing about to be clicked
+    drawing    the pen tilted in, nib touching
+    clicking   a quick press
+    dragging   pressed, with a faint trail
+    """
+    cr.save()
+    if state == "thinking":
+        pulse = 0.5 + 0.5 * math.sin(phase * 2 * math.pi * 1.1)
+        grad = cairo.RadialGradient(x, y, 2, x, y, 26)
+        grad.add_color_stop_rgba(0, *accent, 0.35 + 0.25 * pulse)
+        grad.add_color_stop_rgba(1, *accent, 0)
+        cr.set_source(grad)
+        cr.arc(x, y, 26, 0, 2 * math.pi)
+        cr.fill()
+    if state == "selecting" and box is not None:
+        bx, by, bw, bh = box
+        _rounded_rect(cr, bx - 6, by - 5, bw + 12, bh + 10, 8)
+        cr.set_source_rgba(*accent, 0.18)
+        cr.fill_preserve()
+        cr.set_source_rgba(*accent, 0.85)
+        cr.set_line_width(2)
+        cr.set_dash([6, 4])
+        cr.stroke()
+        cr.set_dash([])
+    press = {"clicking": 3.0, "drawing": 1.5, "dragging": 2.0}.get(state, 0.0)
+    tilt = -math.radians(38 if state in ("drawing", "dragging") else 45)   # body trails down-right
+    cr.translate(x, y)
+    cr.rotate(tilt)
+    cr.translate(0, -press)
+    # the pen body points away from the nib, down and to the right
+    length, width = 44.0, 11.0
+    cr.move_to(0, 0)
+    cr.line_to(width / 2, 12)
+    cr.line_to(-width / 2, 12)
+    cr.close_path()
+    cr.set_source_rgb(*INK)
+    cr.fill()
+    _rounded_rect(cr, -width / 2, 12, width, length - 12, width / 2)
+    grad = cairo.LinearGradient(-width / 2, 0, width / 2, 0)
+    grad.add_color_stop_rgb(0, *SKIN_LIGHT)
+    grad.add_color_stop_rgb(1, *SKIN_DARK)
+    cr.set_source(grad)
+    cr.fill()
+    cr.set_source_rgb(*accent)                  # the cap, in Toby's accent
+    _rounded_rect(cr, -width / 2, length - 10, width, 10, width / 2)
+    cr.fill()
+    cr.set_source_rgba(1, 1, 1, 0.6)            # a highlight down one side
+    cr.rectangle(-width / 2 + 2, 15, 2, length - 28)
+    cr.fill()
+    cr.restore()
+    if state == "clicking":
+        draw_ripple(cr, x, y, 0.35, "left", accent)
+
+
 KEY_NAMES = {"ctrl": "Ctrl", "control": "Ctrl", "leftctrl": "Ctrl", "rightctrl": "Ctrl",
              "shift": "Shift", "leftshift": "Shift", "rightshift": "Shift",
              "alt": "Alt", "leftalt": "Alt", "rightalt": "Alt", "altgr": "AltGr",
@@ -785,6 +844,8 @@ class ChibiDirector:
         self._glance_at = None
         self._finish_at = None
         self._asking = False
+        self.pen = None            # Work Mode's pen cursor: (x, y, state, box)
+        self._pen_until = 0.0
         self._t_state = clock()
         self._last = clock()
         self._lock = threading.Lock()
@@ -1013,6 +1074,15 @@ class ChibiDirector:
     def visible(self):
         return self.state != self.HIDDEN
 
+    def set_pen(self, x, y, state="normal", box=None):
+        """Show Work Mode's pen cursor at (x, y). It stays a couple of
+        seconds after the last move, then goes away by itself."""
+        self.pen = (float(x), float(y), state, box)
+        self._pen_until = self.clock() + 2.5
+
+    def clear_pen(self):
+        self.pen = None
+
     # -- state the stage draws -------------------------------------------------------
     def _set_facing(self, facing):
         if facing != self.facing:
@@ -1106,6 +1176,10 @@ class ChibiDirector:
         self._last = now
         self.phase += dt
         self.squash.step(dt)
+        if self.pen is not None and now > self._pen_until:
+            self.pen = None
+        if self.state == self.HIDDEN:
+            return self.pen is not None
 
         # blinking
         self._next_blink -= dt
@@ -1226,7 +1300,7 @@ class ChibiDirector:
             if focus is self._reach_target:
                 self.reach = (vx / n, vy / n)
             self.look = (max(-1, min(1, vx / 300)), max(-1, min(1, vy / 300)))
-        return self.state != self.HIDDEN
+        return self.state != self.HIDDEN or self.pen is not None
 
     def _advance_stride(self, distance, dt):
         # one full cycle (two steps) per ~64px, but never faster than about
@@ -1265,6 +1339,15 @@ class ChibiDirector:
         x1, y1 = self.x + half_w + 20, self.y + 30
         points = [self._reach_target] if self._reach_target is not None else []
         points += [(rp[0], rp[1]) for rp in self.ripples]
+        if self.pen is not None:
+            px, py, _state, box = self.pen
+            points += [(px, py), (px + 40, py + 40)]
+            if box is not None:
+                points += [(box[0] - 8, box[1] - 8), (box[0] + box[2] + 8, box[1] + box[3] + 8)]
+            if self.state == self.HIDDEN:
+                xs, ys = [p[0] for p in points], [p[1] for p in points]
+                return (int(min(xs) - 34), int(min(ys) - 34),
+                        int(max(xs) - min(xs) + 68), int(max(ys) - min(ys) + 68))
         for px, py in points:
             x0, y0 = min(x0, px - 34), min(y0, py - 34)
             x1, y1 = max(x1, px + 34), max(y1, py + 34)
@@ -1370,9 +1453,15 @@ def make_stage_class():
             cr.paint()
             cr.set_operator(cairo.OPERATOR_OVER)
             d = self.director
+            accent = self._accent()
+            if d.pen is not None:
+                px, py, pstate, pbox = d.pen
+                try:
+                    draw_pen_cursor(cr, px, py, pstate, d.phase, pbox, accent)
+                except Exception as e:
+                    print("PEN CURSOR DRAW ERROR:", e, flush=True)
             if not d.visible:
                 return False
-            accent = self._accent()
             try:
                 if d.steps:
                     cx, cy, _w, _h = self._card_rect()

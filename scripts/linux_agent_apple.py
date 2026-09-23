@@ -71,6 +71,7 @@ import notify
 import permissions
 import screen_view
 import tasks
+import work_mode
 
 SETTINGS = toby_settings.load()
 
@@ -156,6 +157,12 @@ inside actions, even for a single action. Each is one of:
   {{"tool": "job_status", "job": "latest"}}
   {{"tool": "watch_job", "job": "latest", "on_fail": "notify"}}
   {{"tool": "download_file", "url": "https://...", "to": "~/Downloads"}}
+  {{"tool": "look_at_screen"}}
+  {{"tool": "click_on", "target": "#12", "button": "left", "double": false}}
+  {{"tool": "drag", "from": "#4", "to": "#9"}}
+  {{"tool": "scroll", "amount": 3, "target": "#7"}}
+  {{"tool": "draw", "shape": "circle", "target": "42.50"}}
+  {{"tool": "write_by_hand", "text": "Check this", "target": "#15", "where": "below", "size": 22}}
 
 "reply" is shown to the user. "mood" reflects how the reply should feel — pick whichever fits.
 
@@ -171,7 +178,17 @@ Rules:
   disable_study_mode, set_school_schedule, system_status, list_windows, focus_window,
   list_programs, stop_program, list_files, search_files, read_file, write_file,
   move_file, trash_files, open_path, open_terminal, run_command, job_status,
-  watch_job, download_file.
+  watch_job, download_file, look_at_screen, click_on, drag, scroll, draw, write_by_hand.
+- Work Mode tools, for working on what's on screen like a person with a pen, mouse and
+  keyboard: call look_at_screen first; it returns numbered text elements (#id) with
+  positions. Then point at things by "#id", by their exact words or number ("Submit",
+  "42.50"), or with "x"/"y" fractions. draw shapes: circle, underline, strike, highlight,
+  box, check, cross, or arrow (with "to"). write_by_hand "where": below, right, above, at.
+  After acting you get the result; look_at_screen again before the next visual step.
+  Use Work Mode tools only for visual work (marking up a document, a canvas, a UI with no
+  other way in); for opening things, files and commands, the other tools are faster.
+- write_by_hand writes exactly what the user asked you to write. Never compose answers to
+  homework, worksheet, quiz or test questions and write them in; offer to explain instead.
 - Computer tools: paths start with ~ (the user's home). Looking tools (system_status,
   list_windows, list_programs, list_files, search_files, read_file, job_status)
   return what they found; you'll then get a second turn with the results to answer
@@ -572,8 +589,11 @@ DISPATCH = {
 # Tools whose results the model needs to see before it can answer: after they
 # run, Toby gets another turn with what they returned.
 FOLLOW_UP_TOOLS = {"system_status", "list_windows", "list_programs", "list_files", "search_files",
-                   "read_file", "run_command", "job_status"}
+                   "read_file", "run_command", "job_status",
+                   "look_at_screen", "click_on", "drag", "scroll", "draw", "write_by_hand"}
 MAX_TOOL_ROUNDS = 4
+MAX_WORK_MODE_ROUNDS = 10   # look, act, look again: visual work takes more turns
+WORK_TOOLS = {"look_at_screen", "click_on", "drag", "scroll", "draw", "write_by_hand"}
 
 
 def describe_action(action):
@@ -636,6 +656,12 @@ def describe_action(action):
         "watch_job": "Keep an eye on the job",
         "download_file": "Download " + short(os.path.basename(urllib.parse.urlparse(
             str(action.get("url", ""))).path) or "the file", 26),
+        "look_at_screen": "Look at the screen",
+        "click_on": f"Click {short(action.get('target', 'there'), 24)}",
+        "drag": f"Drag {short(action.get('from', 'it'), 14)} to {short(action.get('to', 'there'), 14)}",
+        "scroll": "Scroll " + ("up" if int(action.get("amount", 3) or 3) < 0 else "down"),
+        "draw": f"{str(action.get('shape', 'circle')).capitalize()} {short(action.get('target', 'it'), 22)}",
+        "write_by_hand": f'Write "{short(action.get("text", ""), 22)}"',
     }
     return labels.get(tool, tool.replace("_", " ").capitalize() or "Step")
 
@@ -647,7 +673,8 @@ PHYSICAL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press", "open_u
                   "open_app", "close_tab", "close_active_window", "send_discord_message",
                   "open_terminal", "open_path", "focus_window"}
 # The ones that go through screen_control's consent gate.
-CONTROL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press"}
+CONTROL_TOOLS = {"move_mouse", "click_mouse", "type_text", "key_press",
+                 "click_on", "drag", "scroll", "draw", "write_by_hand"}
 
 
 def load_history():
@@ -855,6 +882,9 @@ def _build_volatile_context():
     if recent_actions:
         recent_str = "; ".join(f"{a['tool']} ({a['summary']})" for a in recent_actions)
         context_lines.append(f"Actions taken earlier this session (most recent last): {recent_str}")
+    if SETTINGS.get("work_mode"):
+        context_lines.append("Work Mode is ON: for anything on screen, look_at_screen and act on "
+                             "it visually (click_on, draw, write_by_hand, drag, scroll).")
     running = JOBS.running()
     if running:
         context_lines.append("Background jobs: " + "; ".join(
@@ -3350,6 +3380,9 @@ class AssistantWindow(Gtk.Window):
         self._resume_event.set()
         self._power_state = "awake"
         self._install_job_tools()
+        self.work = work_mode.WorkMode(screen_control, windows=computer_tools.list_windows,
+                                       settings=lambda: SETTINGS, cursor=self._pen_cursor)
+        self._install_work_tools()
 
         self._hiding = False
         self._fullscreen = False
@@ -3928,6 +3961,7 @@ class AssistantWindow(Gtk.Window):
 
         self._build_animation_settings(settings_page)
         self._build_phone_settings(settings_page)
+        self._build_work_mode_settings(settings_page)
 
         fp_separator = Gtk.Label(label="Fingerprint")
         fp_separator.set_xalign(0)
@@ -4697,6 +4731,26 @@ class AssistantWindow(Gtk.Window):
         toby_settings.save(SETTINGS)
         self.settings_save_status.set_text("Saved.")
         GLib.timeout_add_seconds(3, lambda: self.settings_save_status.set_text("") or False)
+
+    # -- Work Mode settings -------------------------------------------------------
+    def _build_work_mode_settings(self, page):
+        heading = Gtk.Label(label="Work Mode")
+        heading.set_xalign(0)
+        heading.get_style_context().add_class("apple-agent-section-heading")
+        page.pack_start(heading, False, False, 6)
+        row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        text = Gtk.Label(label="Work on the screen with a pen, mouse and keyboard")
+        text.set_tooltip_text("Toby looks at the screen, finds things by their text, and clicks, drags, "
+                              "circles, underlines, highlights and writes by hand, checking each result. "
+                              "Uses the same mouse-and-keyboard permission as everything else.")
+        row.pack_start(text, False, False, 0)
+        self.settings_work_mode_switch = Gtk.Switch()
+        self.settings_work_mode_switch.set_active(bool(SETTINGS.get("work_mode", False)))
+        self.settings_work_mode_switch.connect(
+            "notify::active", lambda sw, _p: sw.get_active() != bool(SETTINGS.get("work_mode"))
+            and self.set_work_mode(sw.get_active()))
+        row.pack_end(self.settings_work_mode_switch, False, False, 0)
+        page.pack_start(row, False, False, 0)
 
     # -- phone settings ------------------------------------------------------------
     def _build_phone_settings(self, page):
@@ -5728,7 +5782,8 @@ class AssistantWindow(Gtk.Window):
         # found; the model gets another turn to answer from real results
         # rather than from what it guessed before looking.
         rounds = 1
-        while (not self.task_cancelled and rounds < MAX_TOOL_ROUNDS
+        limit = MAX_WORK_MODE_ROUNDS if SETTINGS.get("work_mode") else MAX_TOOL_ROUNDS
+        while (not self.task_cancelled and rounds < limit
                and any(a.get("tool") in FOLLOW_UP_TOOLS for a, _out, _ok in results)):
             rounds += 1
             self._thinking_step = self._worker_steps
@@ -5768,7 +5823,9 @@ class AssistantWindow(Gtk.Window):
         if not actions:
             return 0
 
-        if self._chibi_enabled() and any(a.get("tool") in PHYSICAL_TOOLS for a in actions):
+        # In Work Mode, Toby's pen pointer does the work instead of the chibi.
+        if (self._chibi_enabled() and not SETTINGS.get("work_mode")
+                and any(a.get("tool") in PHYSICAL_TOOLS for a in actions)):
             self._set_task_state("preparing")
             GLib.idle_add(self._chibi_begin)
             time.sleep(toby_anim.animation_settings(SETTINGS)["chibi_transform_duration"] * 0.8)
@@ -5919,8 +5976,37 @@ class AssistantWindow(Gtk.Window):
     def set_work_mode(self, on):
         SETTINGS["work_mode"] = bool(on)
         toby_settings.save(SETTINGS)
+        if not on:
+            self.work.close()
+        if getattr(self, "settings_work_mode_switch", None) is not None:
+            self.settings_work_mode_switch.set_active(bool(on))
+        self.island.show_island("Work Mode on" if on else "Work Mode off")
+        GLib.timeout_add_seconds(2, lambda: self.island.hide_island() or False)
         self._publish_remote_state(force=True)
         return False
+
+    # -- Work Mode ---------------------------------------------------------------------
+    def _pen_cursor(self, x, y, state, box=None):
+        """Move Toby's pen pointer (called from the task thread)."""
+        def show():
+            self.chibi_director.set_pen(x, y, state, box)
+            self.chibi_stage.start()
+            return False
+        GLib.idle_add(show)
+
+    def _install_work_tools(self):
+        w = self.work
+        DISPATCH.update({
+            "look_at_screen": lambda a: w.look(),
+            "click_on": lambda a: w.click_on(a.get("target"), a.get("button", "left"), bool(a.get("double")),
+                                             a.get("x"), a.get("y")),
+            "drag": lambda a: w.drag(a.get("from"), a.get("to")),
+            "scroll": lambda a: w.scroll(a.get("amount", 3), a.get("target")),
+            "draw": lambda a: w.draw(a.get("shape", "circle"), a.get("target"), a.get("to"),
+                                     a.get("x"), a.get("y")),
+            "write_by_hand": lambda a: w.write_by_hand(a.get("text", ""), a.get("target"), a.get("where", "below"),
+                                                       a.get("size", 22), a.get("x"), a.get("y")),
+        })
 
     def _chibi_enabled(self):
         return toby_anim.animation_settings(SETTINGS)["chibi_enabled"]
