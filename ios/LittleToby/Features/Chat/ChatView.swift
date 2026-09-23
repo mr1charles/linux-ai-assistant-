@@ -118,6 +118,7 @@ struct ChatView: View {
         let message = text
         guard canSend else { return }
         text = ""
+        focused = false         // put the keyboard away so you can watch Toby work
         Task { await model.ask(message) }
     }
 

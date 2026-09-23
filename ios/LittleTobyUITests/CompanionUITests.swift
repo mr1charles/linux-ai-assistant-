@@ -70,6 +70,8 @@ final class CompanionUITests: XCTestCase {
         sleep(1)
         snap("07-chat")
 
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5),
+                      "sending puts the keyboard away, so the tab bar and Toby's work are visible")
         app.tabBars.buttons["Home"].tap()
         sleep(1)
         snap("08-home-after-task")
