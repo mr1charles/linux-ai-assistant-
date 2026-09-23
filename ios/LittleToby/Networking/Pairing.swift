@@ -115,7 +115,13 @@ final class PairingFlow {
                         }
                         let computer = PairedComputer(id: claim.computer.id, name: claim.computer.name,
                                                       baseURL: link.baseURL, pairedAt: Date())
-                        store.add(computer, token: token)
+                        do {
+                            try store.add(computer, token: token)
+                        } catch let error as Keychain.SaveError {
+                            step = .failed("The computer approved, but this phone couldn't keep the key in its "
+                                           + "Keychain (error \(error.status)). Pair again.")
+                            return
+                        }
                         step = .paired(computerName: claim.computer.name)
                         onPaired(computer)
                         return

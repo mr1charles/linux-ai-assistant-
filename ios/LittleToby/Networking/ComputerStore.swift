@@ -47,8 +47,11 @@ final class ComputerStore {
         return id
     }
 
-    func add(_ computer: PairedComputer, token: String) {
-        Keychain.save(token, for: computer.id)
+    /// Keep a newly paired computer. Throws, and keeps nothing, if the token
+    /// can't be stored: a computer without its token would look paired but
+    /// never connect.
+    func add(_ computer: PairedComputer, token: String) throws {
+        try Keychain.save(token, for: computer.id)
         computers.removeAll { $0.id == computer.id }
         computers.append(computer)
         setActive(computer.id)

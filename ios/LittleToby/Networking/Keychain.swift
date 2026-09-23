@@ -7,19 +7,25 @@ import Security
 enum Keychain {
     private static let service = "com.littletoby.app.tokens"
 
-    static func save(_ token: String, for computerID: String) {
+    /// Why a token couldn't be kept, with the Keychain's own status code.
+    struct SaveError: Error, Equatable {
+        let status: OSStatus
+    }
+
+    static func save(_ token: String, for computerID: String) throws {
         let data = Data(token.utf8)
         let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
                                     kSecAttrService as String: service,
                                     kSecAttrAccount as String: computerID]
         let attributes: [String: Any] = [kSecValueData as String: data,
                                          kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
-        let status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
+        var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
         if status == errSecItemNotFound {
             var add = query
             add.merge(attributes) { _, new in new }
-            SecItemAdd(add as CFDictionary, nil)
+            status = SecItemAdd(add as CFDictionary, nil)
         }
+        guard status == errSecSuccess else { throw SaveError(status: status) }
     }
 
     static func token(for computerID: String) -> String? {

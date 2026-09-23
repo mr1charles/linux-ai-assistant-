@@ -35,12 +35,18 @@ final class CompanionUITests: XCTestCase {
         XCTAssertTrue(compare.waitForExistence(timeout: 15), "the comparison number should show while the computer decides")
         snap("03-compare-number")
         let done = app.buttons["pair.done"]
-        XCTAssertTrue(done.waitForExistence(timeout: 30), "the computer approved, so pairing should finish")
+        if !done.waitForExistence(timeout: 30) {
+            snap("04-pairing-failed")
+            XCTFail("the computer approved, so pairing should finish" + said(app, "pair.error"))
+        }
         snap("04-paired")
         done.tap()
 
         // -- home, connected ------------------------------------------------------------------
-        XCTAssertTrue(waitForText(app, containing: "Connected to", timeout: 20))
+        if !waitForText(app, containing: "Connected to", timeout: 20) {
+            snap("05-not-connected")
+            XCTFail("paired, so the phone should connect" + said(app, "home.headline") + said(app, "home.connectionCard"))
+        }
         XCTAssertTrue(app.otherElements["home.status"].waitForExistence(timeout: 10)
                       || app.descendants(matching: .any)["home.status"].waitForExistence(timeout: 10))
         sleep(1)
@@ -101,6 +107,14 @@ final class CompanionUITests: XCTestCase {
         attachment.name = "\(appearance)-\(name)"
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    /// What an element on screen says, for a failure message.
+    private func said(_ app: XCUIApplication, _ identifier: String) -> String {
+        let element = app.descendants(matching: .any)[identifier].firstMatch
+        guard element.exists else { return "" }
+        let texts = element.descendants(matching: .staticText).allElementsBoundByIndex.map(\.label)
+        return " [\(identifier): \(([element.label] + texts).filter { !$0.isEmpty }.joined(separator: " / "))]"
     }
 
     private func waitForText(_ app: XCUIApplication, containing text: String, timeout: TimeInterval) -> Bool {

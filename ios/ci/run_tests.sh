@@ -22,9 +22,13 @@ if [ "${#DEVICES[@]}" -eq 0 ]; then echo "no iPhone simulators on this machine";
 # full log in build/.
 show() { grep -E --line-buffered "error:|warning: unable|Test Case|Test Suite .*(passed|failed)|Executed|\*\* |Testing started|Failing tests|XCTAssert|failed \(" || true; }
 
+# Left to Xcode's default for the simulator, which signs to run locally (ad
+# hoc, no Apple account needed). Not CODE_SIGNING_ALLOWED=NO: an unsigned
+# simulator app has no entitlements, so the Keychain refuses to keep the
+# pairing token and the app could never connect.
 echo "== building for testing =="
 xcodebuild build-for-testing -project LittleToby.xcodeproj -scheme LittleToby \
-  -destination "id=${DEVICES[0]%% *}" -derivedDataPath build/dd CODE_SIGNING_ALLOWED=NO \
+  -destination "id=${DEVICES[0]%% *}" -derivedDataPath build/dd \
   2>&1 | tee build/build-for-testing.log | show
 
 status=0
@@ -45,15 +49,16 @@ for device in "${DEVICES[@]}"; do
       2>&1 | tee "build/results/${slug}-${appearance}.log" | show
     rc=${PIPESTATUS[0]}
     set -e
-    if [ "$rc" -ne 0 ]; then
-      status=1
-      echo "-- $name, $appearance failed (exit $rc); the end of its log: --"
-      tail -n 60 "build/results/${slug}-${appearance}.log"
-    fi
     out="build/screenshots/${slug}-${appearance}"
     mkdir -p "$out"
     xcrun xcresulttool export attachments --path "$result" --output-path "$out" >/dev/null 2>&1 \
       || echo "(couldn't export screenshots from $result)"
+    if [ "$rc" -ne 0 ]; then
+      status=1
+      echo "-- $name, $appearance failed (exit $rc); the end of its log: --"
+      tail -n 60 "build/results/${slug}-${appearance}.log"
+      break 2      # the other phones would fail the same way; report this one now
+    fi
   done
 done
 echo "== test Toby's log =="; cat build/test-desktop.log
