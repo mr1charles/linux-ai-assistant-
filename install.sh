@@ -78,13 +78,13 @@ fi
 
 if [ -z "${SKIP_SYSTEM_PACKAGES:-}" ] && command -v pacman >/dev/null; then
   step "Installing system packages (asks for your password once)"
+  # Deliberately lean: nothing here pulls in scipy, pandas or the like.
   PKGS=(python python-pip gtk3 python-gobject gtk-layer-shell python-cairo python-requests
-        python-numpy python-networkx python-matplotlib
         espeak-ng ydotool grim tesseract tesseract-data-eng qrencode unzip curl git)
   # ollama: use the GPU build if there's an NVIDIA card, plain otherwise
   if lspci 2>/dev/null | grep -qi nvidia; then PKGS+=(ollama-cuda); else PKGS+=(ollama); fi
   [ "$PHONE" = 1 ] && PKGS+=(tailscale)
-  sudo pacman -S --needed --noconfirm "${PKGS[@]}"
+  sudo pacman -S --needed --noconfirm -q "${PKGS[@]}"
 
   sudo systemctl enable --now ollama.service >/dev/null 2>&1 || warn "Couldn't start Ollama's service; run: sudo systemctl enable --now ollama"
   [ "$PHONE" = 1 ] && { sudo systemctl enable --now tailscaled >/dev/null 2>&1 || true; }
@@ -112,14 +112,24 @@ fi
 
 # -- 3. models --------------------------------------------------------------------
 if [ "$MODELS" = 1 ] && [ "$UPDATE" = 0 ]; then
-  step "Downloading the local AI model"
+  # The recommended model is a ~2.5 GB download. If you already have a model
+  # Toby can use, installing doesn't wait for it: the download runs in the
+  # background, and Toby switches to it by itself once it's there.
   for _ in $(seq 1 15); do curl -s http://localhost:11434/api/tags >/dev/null && break; sleep 1; done
-  pulled=""
-  for model in qwen3:4b-instruct-2507-q4_K_M qwen3:4b-instruct qwen3:4b qwen2.5:7b-instruct; do
-    if ollama list 2>/dev/null | awk '{print $1}' | grep -qx "$model"; then pulled="$model"; break; fi
-    if ollama pull "$model"; then pulled="$model"; break; fi
-  done
-  [ -n "$pulled" ] && note "Using $pulled." || warn "Couldn't download a model. Later, run: toby model qwen3:4b-instruct"
+  BEST="qwen3:4b"
+  installed="$(ollama list 2>/dev/null | awk 'NR>1 {print $1}')"
+  if printf '%s\n' "$installed" | grep -qx "$BEST\|$BEST:latest\|qwen3:4b-instruct.*"; then
+    note "The recommended model is already installed."
+  elif printf '%s\n' "$installed" | grep -q .; then
+    step "Getting the faster AI model in the background"
+    nohup ollama pull "$BEST" >"$DATA_DIR/model-download.log" 2>&1 &
+    note "You already have $(printf '%s\n' "$installed" | head -n1), so Toby works right away."
+    note "$BEST (~2.5 GB) is downloading in the background; Toby switches to it by itself when it's done."
+    note "Progress: tail -f ~/linux-agent/model-download.log"
+  else
+    step "Downloading the AI model (about 2.5 GB — the only big download; it resumes if interrupted)"
+    ollama pull "$BEST" || warn "Couldn't download it. Later, run: toby model $BEST"
+  fi
 
   VOSK_DIR="$DATA_DIR/vosk-model-small-en-us-0.15"
   if [ ! -d "$VOSK_DIR" ]; then

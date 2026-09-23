@@ -21,6 +21,8 @@ lands on the fast one.
 
 import requests
 
+# What the installer downloads is qwen3:4b. The instruct-only builds are
+# listed first in case you've pulled one yourself; they skip "thinking".
 PREFERRED = [
     "qwen3:4b-instruct-2507-q4_K_M",
     "qwen3:4b-instruct",

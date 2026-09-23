@@ -842,7 +842,25 @@ def warm_up_model():
     threading.Thread(target=worker, daemon=True).start()
 
 
+_last_model_check = [0.0]
+
+
+def _maybe_upgrade_model():
+    """If a better model finished downloading in the background, start
+    using it. Checked at most every two minutes, on the request thread."""
+    if SETTINGS.get("ollama_model") or OLLAMA_MODEL_ENV:
+        return
+    if time.monotonic() - _last_model_check[0] < 120:
+        return
+    _last_model_check[0] = time.monotonic()
+    before = OLLAMA_MODEL
+    if resolve_model() != before:
+        apply_model_settings()
+        print(f"MODEL: switched to {OLLAMA_MODEL} now that it's installed", flush=True)
+
+
 def think(instruction, history, on_chunk=None, cancel_check=None):
+    _maybe_upgrade_model()
     system_content = _build_system_content()
     messages = [{"role": "system", "content": system_content}]
     messages.extend(_trim_history(history))

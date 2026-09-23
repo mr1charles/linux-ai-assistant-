@@ -112,11 +112,10 @@ def check_model(r):
     if not installed:
         r.line(BAD, "Ollama isn't answering", "sudo systemctl enable --now ollama")
         return
-    best = next((m for m in model_picker.PREFERRED if m in installed), None)
     r.line(OK, "installed models: " + ", ".join(installed))
-    if best != model_picker.PREFERRED[0]:
-        r.line(WARN, f"the fastest recommended model isn't installed",
-               f"ollama pull {model_picker.PREFERRED[0]}")
+    if not any(name.startswith("qwen3:4b") for name in installed):
+        r.line(WARN, "the faster recommended model isn't installed yet (it may still be downloading)",
+               "toby model qwen3:4b")
 
 
 def _logind_property(name):
