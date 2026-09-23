@@ -4,12 +4,15 @@ consent gate, and animated ("gliding") mouse movement instead of instant jumps.
 """
 
 import subprocess
+import time
 
 from gi.repository import GLib
 
+import toby_anim
+
 _VALID_BUTTONS = {"left", "right", "middle"}
-_GLIDE_STEPS = 24
-_GLIDE_INTERVAL_MS = 12  # ~24 steps * 12ms ≈ 290ms glide duration
+_GLIDE_SECONDS = 0.34   # toby_anim.DURATIONS["emphasized"]
+_GLIDE_INTERVAL_MS = 12
 
 # ---------------------------------------------------------------------------
 # ydotool syntax compatibility
@@ -195,21 +198,20 @@ class ScreenControl:
 
         start_x, start_y = self.current_x_frac, self.current_y_frac
         end_x, end_y = x_frac, y_frac
-        step_count = [0]
-
-        def ease_out_cubic(t):
-            return 1 - (1 - t) ** 3
+        t0 = time.monotonic()
+        ease = toby_anim.EASE["move"]
 
         def step():
-            step_count[0] += 1
-            t = min(1.0, step_count[0] / _GLIDE_STEPS)
-            eased = ease_out_cubic(t)
+            # Time-based on the shared "move" curve: a busy machine makes the
+            # glide choppier, never slower. (It used to count 24 fixed steps.)
+            t = min(1.0, (time.monotonic() - t0) / _GLIDE_SECONDS)
+            eased = ease(t)
             cur_x = start_x + (end_x - start_x) * eased
             cur_y = start_y + (end_y - start_y) * eased
             px, py = self._to_pixels(cur_x, cur_y)
             # A missing ydotoold makes every call hang until its timeout, which
-            # would drag a 24-step glide out for half a minute. Give up on the
-            # whole glide the first time a step doesn't land.
+            # would drag a glide out for many seconds. Give up on the whole
+            # glide the first time a step doesn't land.
             if move_pointer(px, py) != "ok":
                 self.current_x_frac, self.current_y_frac = end_x, end_y
                 return False

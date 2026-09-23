@@ -78,6 +78,214 @@ def lerp(a, b, t):
 
 
 # ---------------------------------------------------------------------------
+# Motion tokens — the one definition every animation draws from
+#
+# Toby's motion is defined here once and consumed in four places: the Python
+# animations below, the GTK stylesheet's transitions, Hyprland's window
+# animations, and the phone app's CSS. tests/test_motion_tokens.py fails if
+# any of them drift from these values, which is what keeps the pill, the
+# island, a window opening and the phone all moving as one system.
+#
+# Four curves, named for what they're for rather than their shape:
+#   enter     something arriving: fast start, long soft settle, no overshoot
+#   exit      something leaving: gathers briefly, then goes quickly
+#   move      something travelling between two resting places
+#   standard  small state changes: hover, press, colour, a value updating
+# ---------------------------------------------------------------------------
+
+CURVES = {
+    "enter": (0.16, 1.0, 0.3, 1.0),
+    "exit": (0.55, 0.0, 0.8, 0.2),
+    "move": (0.33, 1.0, 0.68, 1.0),
+    "standard": (0.2, 0.0, 0.0, 1.0),
+}
+
+# Seconds. Short on purpose: an interface that makes you wait for it to
+# finish moving doesn't feel smooth, it feels slow.
+DURATIONS = {
+    "instant": 0.09,     # press feedback, hover
+    "quick": 0.16,       # small things appearing: a tooltip, a badge, a row
+    "standard": 0.24,    # panels and cards leaving
+    "emphasized": 0.34,  # panels and cards arriving; the pill
+    "gentle": 0.52,      # large surfaces, and anything Toby does with character
+}
+
+
+def cubic_bezier(x1, y1, x2, y2):
+    """An easing function from CSS-style control points, so Python motion
+    matches the stylesheet and Hyprland exactly rather than approximately."""
+
+    def sample(a1, a2, t):
+        return ((1 - 3 * a2 + 3 * a1) * t + (3 * a2 - 6 * a1)) * t * t + 3 * a1 * t
+
+    def slope(a1, a2, t):
+        return 3 * (1 - 3 * a2 + 3 * a1) * t * t + 2 * (3 * a2 - 6 * a1) * t + 3 * a1
+
+    def solve_t(x):
+        t = x
+        for _ in range(8):                      # Newton's method, usually enough
+            err = sample(x1, x2, t) - x
+            d = slope(x1, x2, t)
+            if abs(err) < 1e-6:
+                return t
+            if abs(d) < 1e-6:
+                break
+            t -= err / d
+        lo, hi = 0.0, 1.0                       # bisection fallback, always converges
+        t = x
+        for _ in range(40):
+            v = sample(x1, x2, t)
+            if abs(v - x) < 1e-6:
+                break
+            if v < x:
+                lo = t
+            else:
+                hi = t
+            t = (lo + hi) / 2
+        return t
+
+    def ease(x):
+        x = clamp01(x)
+        if x in (0.0, 1.0):
+            return x
+        return sample(y1, y2, solve_t(x))
+
+    return ease
+
+
+EASE = {name: cubic_bezier(*points) for name, points in CURVES.items()}
+
+
+def css_curve(name):
+    x1, y1, x2, y2 = CURVES[name]
+    return f"cubic-bezier({x1}, {y1}, {x2}, {y2})"
+
+
+def css_ms(name):
+    return f"{round(DURATIONS[name] * 1000)}ms"
+
+
+# ---------------------------------------------------------------------------
+# The animator — how every transition in the interface actually runs
+#
+# One small engine instead of a hand-written timer loop per window. Every
+# animation is time-based, so a busy machine makes it choppier, never
+# longer. Animating a property that is already moving continues from where
+# it is right now, so reversing halfway never jumps. Completion doesn't
+# depend on frames being drawn, so a locked screen can't leave something
+# half-shown. With reduced motion on, everything jumps straight to its end
+# state — and still reports that it finished, so nothing waiting on it
+# breaks. It runs only while something is moving.
+# ---------------------------------------------------------------------------
+
+
+class Animator:
+    def __init__(self, schedule, clock=time.monotonic, reduce_motion=lambda: False):
+        """schedule(callback) must call callback() about every frame until it
+        returns False (in the app: GLib.timeout_add(16, ...))."""
+        self._schedule = schedule
+        self._clock = clock
+        self._reduce = reduce_motion
+        self._running = {}      # key -> animation dict
+        self._values = {}       # key -> last value written
+        self._ticking = False
+
+    def value(self, key, default=None):
+        return self._values.get(key, default)
+
+    def is_running(self, key):
+        return key in self._running
+
+    def animate(self, key, target, apply, duration="standard", curve="enter",
+                start=None, delay=0.0, on_done=None):
+        """Move `key` to `target`, calling apply(value) along the way.
+
+        duration and curve may be token names or raw values. start forces a
+        starting value; otherwise the animation continues from wherever the
+        key is now, which is what makes interruptions seamless.
+        """
+        seconds = DURATIONS.get(duration, duration) if isinstance(duration, str) else float(duration)
+        ease = EASE[curve] if isinstance(curve, str) else curve
+        if start is not None:
+            origin = float(start)
+        elif key in self._running:
+            origin = self._current(self._running[key], self._clock())
+        else:
+            origin = float(self._values.get(key, target))
+        # A superseded animation is dropped without its on_done: a hide that
+        # is interrupted by a show must not go on to finish hiding.
+        self._running.pop(key, None)
+
+        if self._reduce() or seconds <= 0:
+            self._write(key, target, apply)
+            if on_done:
+                on_done()
+            return
+        self._running[key] = {
+            "origin": origin, "target": float(target), "apply": apply,
+            "t0": self._clock() + max(0.0, delay), "seconds": seconds,
+            "ease": ease, "on_done": on_done,
+        }
+        if origin != self._values.get(key):
+            self._write(key, origin, apply)
+        self._ensure_ticking()
+
+    def jump(self, key, value, apply=None):
+        """Set a value immediately, stopping any animation of it."""
+        self._running.pop(key, None)
+        if apply:
+            self._write(key, value, apply)
+        else:
+            self._values[key] = value
+
+    def cancel(self, key):
+        self._running.pop(key, None)
+
+    def _current(self, anim, now):
+        t = (now - anim["t0"]) / anim["seconds"]
+        if t <= 0:
+            return anim["origin"]
+        return lerp(anim["origin"], anim["target"], anim["ease"](t))
+
+    def _write(self, key, value, apply):
+        self._values[key] = value
+        try:
+            apply(value)
+        except Exception as e:
+            print(f"ANIMATION {key!r} FAILED:", e, flush=True)
+
+    def _ensure_ticking(self):
+        if not self._ticking:
+            self._ticking = True
+            self._schedule(self.tick)
+
+    def tick(self):
+        now = self._clock()
+        finished = []
+        for key, anim in list(self._running.items()):
+            t = (now - anim["t0"]) / anim["seconds"]
+            if t < 0:
+                continue                       # still in its delay
+            if t >= 1.0:
+                self._write(key, anim["target"], anim["apply"])
+                finished.append((key, anim))
+            else:
+                self._write(key, self._current(anim, now), anim["apply"])
+        for key, anim in finished:
+            if self._running.get(key) is anim:
+                del self._running[key]
+                if anim["on_done"]:
+                    try:
+                        anim["on_done"]()
+                    except Exception as e:
+                        print(f"ANIMATION {key!r} on_done FAILED:", e, flush=True)
+        if not self._running:
+            self._ticking = False
+            return False
+        return True
+
+
+# ---------------------------------------------------------------------------
 # Springs — for motion that reacts to input and can be retargeted mid-flight
 # ---------------------------------------------------------------------------
 
@@ -175,6 +383,10 @@ class Tween:
 ANIMATION_DEFAULTS = {
     "enabled": True,                 # master switch for everything below
 
+    # Motion for people who find it uncomfortable: every transition jumps
+    # straight to where it ends. The system-wide GTK setting is honoured too.
+    "reduce_motion": False,
+
     # Toby appearing, disappearing, being touched
     "appear_enabled": True,
     "appear_duration": 0.34,
@@ -241,4 +453,5 @@ def animation_settings(settings=None):
         for key in merged:
             if key.endswith("_enabled") or key in ("desktop_reactions", "shutdown_fade"):
                 merged[key] = False
+        merged["reduce_motion"] = True
     return merged

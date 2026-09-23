@@ -1013,23 +1013,73 @@ def think_cloud(instruction, history, on_chunk=None, cancel_check=None):
     return _parse_llm_json_reply(raw)
 
 # ---------------------------------------------------------------------------
-# Animation helpers
+# Motion — every transition in this file runs through MOTION
+#
+# The curves, durations and the engine itself live in toby_anim.py, shared
+# with the chibi, the lid fold, the stylesheet, Hyprland and the phone app.
+# Nothing below writes its own timer loop or easing function any more: a
+# window appearing calls reveal(), leaving calls dismiss(), and anything
+# else calls MOTION.animate(). See docs/ANIMATION.md.
 # ---------------------------------------------------------------------------
 
-def ease_out_back(t):
-    c1 = 1.70158
-    c3 = c1 + 1
-    t = max(0.0, min(1.0, t))
-    return 1 + c3 * (t - 1) ** 3 + c1 * (t - 1) ** 2
+from toby_anim import ease_out_cubic, lerp  # noqa: E402  (used by the face and ring)
 
 
-def ease_out_cubic(t):
-    t = max(0.0, min(1.0, t))
-    return 1 - (1 - t) ** 3
+def _reduce_motion():
+    """The user's reduced-motion setting, or GTK's system-wide equivalent."""
+    if toby_anim.animation_settings(SETTINGS)["reduce_motion"]:
+        return True
+    settings = Gtk.Settings.get_default()
+    try:
+        return settings is not None and not settings.get_property("gtk-enable-animations")
+    except Exception:
+        return False
 
 
-def lerp(a, b, t):
-    return a + (b - a) * t
+MOTION = toby_anim.Animator(lambda tick: GLib.timeout_add(16, tick), reduce_motion=_reduce_motion)
+
+
+def _margin_setter(window, edge):
+    return lambda value: GtkLayerShell.set_margin(window, edge, int(round(value)))
+
+
+def reveal(window, surface, key, edge=None, margin_from=None, margin_to=None,
+           duration="emphasized"):
+    """Bring a window in: a fade, plus a short travel along its anchored edge.
+
+    Safe to call on a window that is already showing or halfway through
+    leaving — it simply turns around from wherever it is.
+    """
+    arriving = not window.get_visible()
+    window.set_visible(True)
+    if arriving:
+        MOTION.jump(key + "/opacity", 0.0, surface.set_opacity)
+        if edge is not None:
+            MOTION.jump(key + "/margin", margin_from, _margin_setter(window, edge))
+    MOTION.animate(key + "/opacity", 1.0, surface.set_opacity, duration, "enter")
+    if edge is not None:
+        MOTION.animate(key + "/margin", margin_to, _margin_setter(window, edge), duration, "enter")
+
+
+def dismiss(window, surface, key, edge=None, margin_to=None, on_done=None):
+    """Send a window away: fade and travel out, then actually hide it.
+
+    If reveal() is called before this finishes, the hide is abandoned — the
+    window turns around instead of vanishing mid-return.
+    """
+    if not window.get_visible():
+        if on_done:
+            on_done()
+        return
+
+    def finish():
+        window.set_visible(False)
+        if on_done:
+            on_done()
+
+    MOTION.animate(key + "/opacity", 0.0, surface.set_opacity, "standard", "exit", on_done=finish)
+    if edge is not None:
+        MOTION.animate(key + "/margin", margin_to, _margin_setter(window, edge), "standard", "exit")
 
 
 class State(Enum):
@@ -1527,6 +1577,7 @@ class DynamicIsland(Gtk.Window):
         self.set_decorated(False)
 
         box = Gtk.EventBox()
+        self._surface = box
         box.get_style_context().add_class("apple-agent-island")
         box.get_style_context().add_class("apple-agent-surface")
         box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
@@ -1714,45 +1765,14 @@ class DynamicIsland(Gtk.Window):
         if self._visible_target:
             return
         self._visible_target = True
-        self.set_visible(True)
-        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, -60)
-
-        state = {"i": 0}
-        steps = 10
-
-        def step():
-            if not self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(-60, 14, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, margin)
-            return t < 1.0
-
-        GLib.timeout_add(14, step)
+        reveal(self, self._surface, "island", GtkLayerShell.Edge.TOP, -60, 14)
 
     def hide_island(self):
         self.hide_card()
         if not self._visible_target:
             return
         self._visible_target = False
-
-        state = {"i": 0}
-        steps = 10
-
-        def step():
-            if self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(14, -60, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.TOP, margin)
-            if t >= 1.0:
-                self.set_visible(False)
-                return False
-            return True
-
-        GLib.timeout_add(14, step)
+        dismiss(self, self._surface, "island", GtkLayerShell.Edge.TOP, -60)
 
 # ---------------------------------------------------------------------------
 # Island expanded view — double-click/hold the island to see this: the
@@ -1783,6 +1803,7 @@ class IslandExpanded(Gtk.Window):
         self.set_size_request(320, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-island-expanded")
         outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1839,11 +1860,11 @@ class IslandExpanded(Gtk.Window):
     def open(self, task_text, steps):
         self._task_start = time.monotonic()
         self.set_task(task_text, steps)
-        self.set_visible(True)
+        reveal(self, self._surface, "island-expanded", GtkLayerShell.Edge.TOP, 58, 70)
 
     def close(self):
         self._task_start = None
-        self.set_visible(False)
+        dismiss(self, self._surface, "island-expanded", GtkLayerShell.Edge.TOP, 62)
 
 # ---------------------------------------------------------------------------
 # Study Helper — a small persistent panel that appears (top-right) whenever
@@ -1992,6 +2013,7 @@ class StudyHelper(Gtk.Window):
         self.set_size_request(220, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-study-helper")
         outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -2044,41 +2066,13 @@ class StudyHelper(Gtk.Window):
         if self._visible_target:
             return
         self._visible_target = True
-        self.set_visible(True)
-        state = {"i": 0}
-        steps = 12
-
-        def step():
-            if not self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(-260, 16, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, margin)
-            return t < 1.0
-
-        GLib.timeout_add(14, step)
+        reveal(self, self._surface, "study-helper", GtkLayerShell.Edge.RIGHT, -260, 16, "gentle")
 
     def close_helper(self):
         if not self._visible_target:
             return
         self._visible_target = False
-        state = {"i": 0}
-        steps = 10
-
-        def step():
-            if self._visible_target:
-                return False
-            state["i"] += 1
-            t = min(1.0, state["i"] / steps)
-            margin = int(lerp(16, -260, ease_out_cubic(t)))
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.RIGHT, margin)
-            if t >= 1.0:
-                self.set_visible(False)
-                return False
-            return True
-
-        GLib.timeout_add(14, step)
+        dismiss(self, self._surface, "study-helper", GtkLayerShell.Edge.RIGHT, -260)
 
 
 # ---------------------------------------------------------------------------
@@ -2115,6 +2109,7 @@ class StudyReviewWindow(Gtk.Window):
         self.set_size_request(420, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-island-expanded")
         outer.get_style_context().add_class("apple-agent-surface")
         self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -2175,11 +2170,11 @@ class StudyReviewWindow(Gtk.Window):
             self.reveal_btn.set_visible(mode == "flashcards")
             self.next_btn.set_visible(True)
             self._render_current()
-        self.set_visible(True)
+        reveal(self, self._surface, "study-review")
         self.present()
 
     def close_review(self):
-        self.set_visible(False)
+        dismiss(self, self._surface, "study-review")
 
     def _clear_options(self):
         for child in self.options_box.get_children():
@@ -2270,6 +2265,7 @@ class TopicDetailWindow(Gtk.Window):
         self.set_size_request(420, -1)
 
         outer = Gtk.EventBox()
+        self._surface = outer
         outer.get_style_context().add_class("apple-agent-island-expanded")
         outer.get_style_context().add_class("apple-agent-surface")
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -2301,7 +2297,7 @@ class TopicDetailWindow(Gtk.Window):
 
         close_btn = Gtk.Button(label="Close")
         close_btn.get_style_context().add_class("apple-agent-panel-button")
-        close_btn.connect("clicked", lambda *_: self.set_visible(False))
+        close_btn.connect("clicked", lambda *_: self.close_topic())
         box.pack_start(close_btn, False, False, 4)
 
         self.add(outer)
@@ -2326,8 +2322,11 @@ class TopicDetailWindow(Gtk.Window):
             self.links_box.pack_start(btn, False, False, 0)
         self.links_box.show_all()
 
-        self.set_visible(True)
+        reveal(self, self._surface, "topic-detail")
         self.present()
+
+    def close_topic(self):
+        dismiss(self, self._surface, "topic-detail")
 
     def _on_quiz_clicked(self, *_a):
         if self.current_topic:
@@ -2424,6 +2423,9 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     accent_wash = f"rgba({r}, {g}, {b}, 0.18)"
     accent_edge = f"rgba({r}, {g}, {b}, 0.45)"
     accent_glow = f"rgba({r}, {g}, {b}, 0.40)"
+    # hover, press and focus feedback: the "instant" duration on the
+    # "standard" curve, the same tokens every other animation uses
+    MOTION_FAST = f"{toby_anim.css_ms('instant')} {toby_anim.css_curve('standard')}"
 
     return f"""
 /* ---------------------------------------------------------------------
@@ -2446,7 +2448,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     font-size: {TYPE_BODY}px;
     caret-color: {INK_BRIGHT};
     box-shadow: none;
-    transition: border 120ms ease-out, background-color 120ms ease-out;
+    transition: border {MOTION_FAST}, background-color {MOTION_FAST};
 }}
 .apple-agent-surface entry:focus {{
     border: 1px solid {accent_edge};
@@ -2466,7 +2468,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     font-size: {TYPE_SMALL}px;
     text-shadow: none;
     box-shadow: none;
-    transition: background-color 120ms ease-out, color 120ms ease-out, border 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST}, border {MOTION_FAST};
 }}
 .apple-agent-surface button:hover {{
     color: {INK_BRIGHT};
@@ -2573,7 +2575,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     font-size: {TYPE_LEAD}px;
     caret-color: {INK_BRIGHT};
     box-shadow: none;
-    transition: box-shadow 150ms ease-out;
+    transition: box-shadow {MOTION_FAST};
 }}
 .apple-agent-entry:focus {{
     outline: none;
@@ -2598,7 +2600,7 @@ def build_css(accent_hex=DEFAULT_ACCENT):
     min-height: 22px;
     font-size: {TYPE_SMALL}px;
     box-shadow: none;
-    transition: background-color 120ms ease-out, color 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST};
 }}
 .apple-agent-close:hover {{
     color: {INK_BRIGHT};
@@ -2642,7 +2644,7 @@ button.apple-agent-panel-button {{
     border-radius: {RADIUS_CONTROL}px;
     padding: 7px 14px;
     font-size: {TYPE_SMALL}px;
-    transition: background-color 120ms ease-out, color 120ms ease-out, border 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST}, border {MOTION_FAST};
 }}
 button.apple-agent-panel-button:hover {{
     color: {INK_BRIGHT};
@@ -2734,7 +2736,7 @@ button.apple-agent-nav-button {{
     border-radius: {RADIUS_CONTROL}px;
     padding: 11px 14px;
     font-size: {TYPE_BODY}px;
-    transition: background-color 120ms ease-out, color 120ms ease-out;
+    transition: background-color {MOTION_FAST}, color {MOTION_FAST};
 }}
 button.apple-agent-nav-button:hover {{
     color: {INK_BRIGHT};
@@ -3114,6 +3116,8 @@ class AssistantWindow(Gtk.Window):
         self._confirm_result = False
 
         self._hiding = False
+        self._fullscreen = False
+        self._deferred_card = None
         self._fingerprint_ready = False
         self._fingerprint_scan = None
         self.school_mode_config = school_mode.load_config()
@@ -3312,6 +3316,7 @@ class AssistantWindow(Gtk.Window):
         # background directly on itself, which is exactly why this was
         # rendering transparent.
         sidebar_outer = Gtk.EventBox()
+        self.sidebar_surface = sidebar_outer
         sidebar_outer.get_style_context().add_class("apple-agent-sidebar-window")
         sidebar_outer.get_style_context().add_class("apple-agent-surface")
         self.sidebar_window.add(sidebar_outer)
@@ -3333,7 +3338,7 @@ class AssistantWindow(Gtk.Window):
 
         self.content_stack = Gtk.Stack()
         self.content_stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
-        self.content_stack.set_transition_duration(150)
+        self.content_stack.set_transition_duration(int(toby_anim.DURATIONS["quick"] * 1000))
         self.expanded_area.pack_start(self.content_stack, True, True, 0)
 
         self.nav_buttons = {}
@@ -3917,7 +3922,7 @@ class AssistantWindow(Gtk.Window):
         Once per login: a marker in the runtime directory (cleared when you
         log out) stops a restart from greeting you again.
         """
-        if self.get_visible():
+        if self.get_visible() or self._fullscreen:
             return False
         marker = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "little-toby-greeted"
         if marker.exists():
@@ -3935,6 +3940,16 @@ class AssistantWindow(Gtk.Window):
         return False
 
     def _on_desktop_event(self, name, data):
+        if name == "fullscreen":
+            # Something went fullscreen (a video, a game) or came back. Toby
+            # holds its unrequested interruptions until it's over.
+            self._fullscreen = data.strip() == "1"
+            if not self._fullscreen and self._deferred_card:
+                asked, reply = self._deferred_card
+                self._deferred_card = None
+                GLib.timeout_add(int(toby_anim.DURATIONS["gentle"] * 1000),
+                                 lambda: self._show_reply_card(asked, reply) or False)
+            return False
         direction = 0.0
         if name in ("workspace", "workspacev2"):
             ident = data.split(",")[0]
@@ -4130,10 +4145,11 @@ class AssistantWindow(Gtk.Window):
             self.refresh_dashboard()
             self.refresh_memory_graph()
             self.refresh_study_plan_grid()
-            self.sidebar_window.set_visible(True)
+            reveal(self.sidebar_window, self.sidebar_surface, "sidebar",
+                   GtkLayerShell.Edge.TOP, 56, 80, "gentle")
             self.sidebar_window.present()
         else:
-            self.sidebar_window.set_visible(False)
+            dismiss(self.sidebar_window, self.sidebar_surface, "sidebar", GtkLayerShell.Edge.TOP, 64)
         self.input_shape_combine_region(None)
 
     def switch_nav(self, key):
@@ -4327,6 +4343,7 @@ class AssistantWindow(Gtk.Window):
     # -- animation settings ------------------------------------------------------
     ANIMATION_SWITCHES = [
         ("enabled", "Animations"),
+        ("reduce_motion", "Reduce motion"),
         ("fold_enabled", "Lid fold when the laptop sleeps"),
         ("chibi_enabled", "Toby walks out and does tasks on screen"),
         ("idle_enabled", "Idle life (breathing, blinking)"),
@@ -4604,7 +4621,7 @@ class AssistantWindow(Gtk.Window):
         self.topic_detail.open_topic(topic)
 
     def on_topic_quiz_requested(self, subject, topic_name):
-        self.topic_detail.set_visible(False)
+        self.topic_detail.close_topic()
         self.study_helper.set_status(f"Building a quiz on {topic_name}…")
 
         def worker():
@@ -5107,18 +5124,24 @@ class AssistantWindow(Gtk.Window):
         threading.Thread(target=self.process, args=(text, force_cloud), daemon=True).start()
 
     def _start_thinking_dots(self):
-        self._dot_frame = 0
+        """While waiting for the first words, "Thinking" breathes gently.
 
-        def cycle():
+        It replaces a row of cycling dots, which is a loading spinner in
+        text form. The face's drifting motes already say Toby is working;
+        this just makes the answer line feel alive rather than stuck.
+        """
+        self.answer.set_text("Thinking")
+        self.answer.set_visible(True)
+        self.answer.show()
+
+        def breathe(toward):
             if not self._waiting_for_first_chunk:
-                return False
-            self._dot_frame = (self._dot_frame + 1) % 4
-            self.answer.set_text("Thinking" + "." * self._dot_frame)
-            self.answer.set_visible(True)
-            self.answer.show()
-            return True
+                MOTION.animate("answer/opacity", 1.0, self.answer.set_opacity, "quick", "standard")
+                return
+            MOTION.animate("answer/opacity", toward, self.answer.set_opacity, 0.9, "move",
+                           on_done=lambda: breathe(1.0 if toward < 1.0 else 0.45))
 
-        GLib.timeout_add(400, cycle)
+        breathe(0.45)
 
     def _maybe_show_thinking_island(self, request_id):
         if request_id == self._request_id and self._waiting_for_first_chunk:
@@ -5555,6 +5578,9 @@ class AssistantWindow(Gtk.Window):
         itself is right there now, with the four things anyone actually wants
         to do about it.
         """
+        if self._fullscreen:
+            self._deferred_card = (asked, reply_text)   # shown when fullscreen ends
+            return
         preview = " ".join(reply_text.split())
         if len(preview) > 220:
             preview = preview[:217] + "…"
@@ -5670,49 +5696,17 @@ class AssistantWindow(Gtk.Window):
             self.show_panel()
 
     def _fade_outer(self, gen, start, end, duration, curve, on_done=None):
-        """Fade the pill's contents between two opacities on the frame clock.
-
-        Opacity goes on the inner container, not the window: GDK on Wayland
-        ignores opacity on a toplevel, but a child widget's opacity is
-        composited by GTK itself and works everywhere. Any newer show/hide
-        (a higher generation) cancels this one mid-fade, so the two never
-        fight.
-        """
-        t0 = time.monotonic()
-        finished = [False]
-
-        def finish():
-            if finished[0]:
-                return
-            finished[0] = True
-            self.outer.set_opacity(end)
-            if on_done:
+        """Fade the pill's contents. Opacity goes on the inner container, not
+        the window: GDK on Wayland ignores opacity on a toplevel, but a child
+        widget's opacity is composited by GTK itself and works everywhere.
+        A newer show or hide supersedes this one, so the two never fight, and
+        MOTION finishes it on the clock even if no frames arrive."""
+        def done():
+            if gen == self._panel_generation and on_done:
                 on_done()
 
-        def step(_widget, _clock):
-            if gen != self._panel_generation or finished[0]:
-                return GLib.SOURCE_REMOVE
-            t = (time.monotonic() - t0) / max(0.001, duration)
-            self.outer.set_opacity(lerp(start, end, curve(t)))
-            if t >= 1.0:
-                finish()
-                return GLib.SOURCE_REMOVE
-            return GLib.SOURCE_CONTINUE
-
-        self.outer.set_opacity(start)
-        self.outer.add_tick_callback(step)
-
-        # Frame callbacks stop when the screen locks or the display sleeps.
-        # If that happens mid-fade, finish on the clock instead, so the pill
-        # can never be left invisible or half-hidden. Completion is tracked
-        # explicitly: a fade from 0 to 0 (hiding right after showing) is
-        # still a fade that has to call on_done.
-        def finish_anyway():
-            if gen == self._panel_generation:
-                finish()
-            return False
-
-        GLib.timeout_add(int(duration * 1000) + 250, finish_anyway)
+        MOTION.animate("pill/opacity", end, self.outer.set_opacity, duration, curve,
+                       start=start, on_done=done)
 
     def show_panel(self):
         self._panel_generation += 1
@@ -5720,16 +5714,19 @@ class AssistantWindow(Gtk.Window):
         gen = self._panel_generation
         anim = toby_anim.animation_settings(SETTINGS)
         if anim["appear_enabled"]:
-            self._fade_outer(gen, 0.0, 1.0, anim["appear_duration"], toby_anim.ease_out_expo)
+            self._fade_outer(gen, 0.0, 1.0, anim["appear_duration"], "enter")
         else:
-            self.outer.set_opacity(1.0)
+            MOTION.jump("pill/opacity", 1.0, self.outer.set_opacity)
         self.ring.fire()
         self.outer.get_style_context().remove_class("apple-agent-panel")
         self.outer.get_style_context().add_class("apple-agent-panel-hidden")
 
-        start_margin = -300  # fully below the visible screen, slides up from here
         end_margin = 55
-        GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, start_margin)
+        # Arriving from nowhere, rise from fully below the screen. Summoned
+        # again while still sinking away, turn around from right where it is.
+        start_margin = None if self.get_visible() else -300
+        if start_margin is not None:
+            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, start_margin)
 
         self.set_visible(True)
         self.present()
@@ -5738,20 +5735,10 @@ class AssistantWindow(Gtk.Window):
         self.face.set_state(State.WAKING)
         self.last_interaction = time.monotonic()
 
-        slide_state = {"i": 0}
-        slide_steps = 16  # fewer steps, same 16ms cadence -> a quick ~250ms snap instead of ~400ms
-
-        def slide_step():
-            if gen != self._panel_generation:
-                return False  # a hide (or another show) happened mid-animation — stop
-            slide_state["i"] += 1
-            t = min(1.0, slide_state["i"] / slide_steps)
-            eased = ease_out_back(t)  # slight overshoot for a snappy, springy feel
-            margin = int(start_margin + (end_margin - start_margin) * eased)
-            GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM, margin)
-            return t < 1.0
-
-        GLib.timeout_add(16, slide_step)
+        # Rise into place on the "enter" curve: quick, then a long soft
+        # settle. It used to overshoot and spring back, which read as a toy.
+        MOTION.animate("pill/margin", end_margin, _margin_setter(self, GtkLayerShell.Edge.BOTTOM),
+                       "emphasized", "enter", start=start_margin)
         GLib.timeout_add(220, lambda: self._reveal_box(gen))
         GLib.timeout_add(300, lambda: self._reveal_entry(gen))
 
@@ -5792,21 +5779,11 @@ class AssistantWindow(Gtk.Window):
             self._hiding = True
             # fade out while sinking a little, the reverse of arriving
             self.face.set_state(State.SLEEPING)
-            start_margin = GtkLayerShell.get_margin(self, GtkLayerShell.Edge.BOTTOM)
-            t0 = time.monotonic()
             duration = anim["disappear_duration"]
-
-            def sink():
-                if gen != self._panel_generation:
-                    return False
-                t = (time.monotonic() - t0) / duration
-                GtkLayerShell.set_margin(self, GtkLayerShell.Edge.BOTTOM,
-                                         int(start_margin - 26 * toby_anim.ease_in_cubic(t)))
-                return t < 1.0
-
-            GLib.timeout_add(16, sink)
-            self._fade_outer(gen, self.outer.get_opacity(), 0.0, duration,
-                             toby_anim.ease_in_cubic, on_done=lambda: self._finish_hide(gen))
+            MOTION.animate("pill/margin", MOTION.value("pill/margin", 55) - 26,
+                           _margin_setter(self, GtkLayerShell.Edge.BOTTOM), duration, "exit")
+            self._fade_outer(gen, None, 0.0, duration,
+                             "exit", on_done=lambda: self._finish_hide(gen))
             return
         self._finish_hide(gen)
 
@@ -5814,7 +5791,7 @@ class AssistantWindow(Gtk.Window):
         if gen != self._panel_generation:
             return  # shown again while fading out; leave it be
         self._hiding = False
-        self.outer.set_opacity(1.0)
+        MOTION.jump("pill/opacity", 1.0, self.outer.set_opacity)
         self.set_visible(False)
         self.entry.set_visible(False)
         self.close_btn.set_visible(False)

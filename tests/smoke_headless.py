@@ -330,6 +330,107 @@ if win is not None:
     except Exception:
         errors.append("face animations: " + traceback.format_exc())
 
+# -- the shared motion engine, driving real windows ---------------------------
+if win is not None:
+    import time as _t
+
+    def pump(seconds, until=None):
+        ctx = GLib.MainContext.default()
+        end = _t.monotonic() + seconds
+        while _t.monotonic() < end:
+            ctx.iteration(False)
+            if until and until():
+                return True
+            _t.sleep(0.005)
+        return False
+
+    try:
+        stub = _layer_shell_stub
+        margins = []
+        real_set_margin = app.GtkLayerShell.set_margin
+
+        def logging_set_margin(window, edge, value):
+            if window is win.island:
+                margins.append(value)
+            real_set_margin(window, edge, value)
+
+        app.GtkLayerShell.set_margin = logging_set_margin
+
+        # the island arrives and settles exactly in place
+        win.island.hide_island()
+        pump(0.6)
+        margins.clear()
+        win.island.show_island("hello")
+        pump(0.6)
+        if not margins or margins[-1] != 14:
+            errors.append(f"the island didn't settle at its resting place: {margins[-3:]}")
+        if abs(win.island._surface.get_opacity() - 1.0) > 1e-3:
+            errors.append("the island didn't finish fading in")
+
+        # hidden halfway, then shown again: it turns around, never jumps
+        margins.clear()
+        win.island.hide_island()
+        pump(0.08)
+        win.island.show_island("again")
+        pump(0.6)
+        biggest = max(abs(b - a) for a, b in zip(margins, margins[1:])) if len(margins) > 1 else 0
+        if biggest > 20:
+            errors.append(f"the island jumped {biggest}px when reversed mid-hide")
+        if not win.island.get_visible():
+            errors.append("the island was hidden after being shown again mid-hide")
+        app.GtkLayerShell.set_margin = real_set_margin
+
+        # leaving really hides it, on the clock
+        win.island.hide_island()
+        if not pump(1.0, until=lambda: not win.island.get_visible()):
+            errors.append("the island never finished leaving")
+
+        # the sidebar opens and closes with the same engine
+        win.toggle_expanded()
+        pump(0.8)
+        if abs(win.sidebar_surface.get_opacity() - 1.0) > 1e-3:
+            errors.append("the sidebar didn't finish fading in")
+        win.toggle_expanded()
+        if not pump(1.0, until=lambda: not win.sidebar_window.get_visible()):
+            errors.append("the sidebar never finished closing")
+
+        # reduced motion: everything lands instantly, and still completes
+        app.SETTINGS["animations"] = {"reduce_motion": True}
+        win.island.show_island("calm")
+        if abs(win.island._surface.get_opacity() - 1.0) > 1e-3:
+            errors.append("with reduced motion the island still animated in")
+        win.island.hide_island()
+        if win.island.get_visible():
+            errors.append("with reduced motion the island didn't hide at once")
+        app.SETTINGS["animations"] = {}
+
+        # "Thinking" breathes while waiting, and settles when words arrive
+        win._waiting_for_first_chunk = True
+        win._start_thinking_dots()
+        pump(0.5)
+        if win.answer.get_text() != "Thinking":
+            errors.append(f"the waiting text is {win.answer.get_text()!r}")
+        if win.answer.get_opacity() > 0.95:
+            errors.append("\"Thinking\" isn't breathing")
+        win._waiting_for_first_chunk = False
+        pump(2.0)
+        if abs(win.answer.get_opacity() - 1.0) > 1e-3:
+            errors.append("the answer line stayed dimmed after waiting ended")
+
+        # fullscreen holds the reply card until it's over
+        win.set_visible(False)
+        win._on_desktop_event("fullscreen", "1")
+        win._show_reply_card("q", "a reply")
+        if win.island.showing_card():
+            errors.append("a reply card appeared over a fullscreen window")
+        win._on_desktop_event("fullscreen", "0")
+        if not pump(2.0, until=win.island.showing_card):
+            errors.append("the held reply card never appeared after fullscreen ended")
+        win.island.hide_island()
+        pump(0.6)
+    except Exception:
+        errors.append("motion engine in the app: " + traceback.format_exc())
+
 # -- animation settings save and take effect ---------------------------------
 if win is not None:
     try:

@@ -382,9 +382,25 @@ settle, no cartoon bounce — so the pill, the chibi, the island and the fold
 feel like one thing. The face breathes, blinks, glances toward a workspace
 you switch to, looks up when a window opens, squashes when you tap it, hops
 when a task is done, and has drifting motes instead of a spinner while it
-thinks. The pill fades and slides in and out.
+thinks. While a reply is on its way, the word "Thinking" breathes gently.
 
-**Settings, Animations** has a switch for each animation and sliders for
+Every panel (the pill, the sidebar, the Dynamic Island and its task view,
+the Study Helper, quizzes and topic cards) fades and settles into place
+through one shared animation engine. Things arrive quickly and leave
+faster. If you change your mind halfway, say by summoning the pill while
+it's still sinking, it turns around from where it is instead of jumping.
+Hover and press feedback, Hyprland's window animations and the phone app
+all use the same four curves and five durations.
+
+While a window is fullscreen (a video or a game), Toby holds back anything
+you didn't ask for: reply cards wait until you leave fullscreen, and the
+login greeting is skipped.
+
+**Settings, Animations, Reduce motion** makes everything appear and
+disappear in place, with no travel. It's also on automatically if animations
+are turned off system-wide in GTK (`gtk-enable-animations`).
+
+**Settings, Animations** also has a switch for each animation and sliders for
 fold speed, strength, perspective, motion blur and shrink, idle
 liveliness, tap reaction and walking speed, plus Preview the fold. They're
 saved in `settings.json` under `"animations"`, where out-of-range values are
@@ -400,6 +416,9 @@ It's all tuned for an integrated-graphics laptop. With the pill open and
 idle Toby uses a few percent of one core (it was about 18% before this
 work), under 1% hidden, and nothing is drawn by any overlay once its
 animation ends.
+
+[docs/ANIMATION.md](docs/ANIMATION.md) lists every animation, where it
+lives, the shared curves and durations, and how to add a new one.
 
 ## What it can do
 

@@ -22,12 +22,16 @@ config providers that parse keyword arguments differently.
 import json
 import subprocess
 
+import toby_anim
+
 # Bezier control points. Named toby* so they're recognisable in
 # `hyprctl animations` and never collide with the shell's own curves.
+# These are the same curves the rest of Toby uses (toby_anim.CURVES), so a
+# window opening moves exactly like the pill, the island and the phone app.
 BEZIERS = {
-    "tobyOut": (0.16, 1.0, 0.3, 1.0),     # arrivals: fast, then a long settle
-    "tobyIn": (0.55, 0.0, 0.8, 0.2),      # departures: gather, then go
-    "tobyMove": (0.33, 1.0, 0.68, 1.0),   # things travelling between places
+    "tobyOut": toby_anim.CURVES["enter"],   # arrivals: fast, then a long settle
+    "tobyIn": toby_anim.CURVES["exit"],     # departures: gather, then go
+    "tobyMove": toby_anim.CURVES["move"],   # things travelling between places
 }
 
 # (animation, speed in Hyprland's units of 100 ms, bezier, style)
