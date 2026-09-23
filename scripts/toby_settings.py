@@ -16,6 +16,8 @@ DEFAULTS = {
     "response_style": "balanced",     # "concise" | "balanced" | "detailed"
     "memory_enabled": True,            # knowledge graph + study notes extraction
     "notifications_enabled": True,     # Dynamic Island "reply ready" popups
+    "island_enabled": True,            # the Dynamic Island pill at all (off: never shown, except the
+                                        # "your phone is viewing this screen" privacy notice)
     "accent_color": "#5a8cff",         # sidebar/nav accent, hex
     "ollama_model": "",                # "" = use the script's built-in default
     "voice_mode_enabled": False,       # Voice Mode off by default — mic access is opt-in

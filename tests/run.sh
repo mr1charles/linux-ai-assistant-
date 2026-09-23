@@ -125,6 +125,7 @@ echo "== headless UI smoke test =="
 if command -v xvfb-run >/dev/null 2>&1; then
     tmp_home="$(make_home)"
     HOME="$tmp_home" xvfb-run -a "$PY" tests/smoke_headless.py || status=1
+    HOME="$tmp_home" xvfb-run -a "$PY" tests/test_island_setting.py || status=1
     rm -rf "$tmp_home"
 else
     echo "   skipped: xvfb-run not installed"

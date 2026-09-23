@@ -1895,8 +1895,12 @@ class DynamicIsland(Gtk.Window):
     def showing_card(self):
         return self._showing_card
 
-    def show_island(self, text):
+    def show_island(self, text, force=False):
+        """force: show even with the island turned off in Settings (only the
+        privacy notice that a phone is viewing the screen uses it)."""
         self.set_status(text)
+        if not force and not SETTINGS.get("island_enabled", True):
+            return
         if self._visible_target:
             return
         self._visible_target = True
@@ -3804,6 +3808,13 @@ class AssistantWindow(Gtk.Window):
         memory_switch_row.pack_end(self.settings_memory_switch, False, False, 0)
         settings_page.pack_start(memory_switch_row, False, False, 0)
 
+        island_switch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        island_switch_row.pack_start(Gtk.Label(label="Show the Dynamic Island"), False, False, 0)
+        self.settings_island_switch = Gtk.Switch()
+        self.settings_island_switch.set_active(SETTINGS.get("island_enabled", True))
+        island_switch_row.pack_end(self.settings_island_switch, False, False, 0)
+        settings_page.pack_start(island_switch_row, False, False, 0)
+
         notif_switch_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         notif_switch_row.pack_start(Gtk.Label(label="Dynamic Island notifications"), False, False, 0)
         self.settings_notif_switch = Gtk.Switch()
@@ -4346,7 +4357,7 @@ class AssistantWindow(Gtk.Window):
         viewing = bool(SCREEN.viewing())
         if viewing and not self._viewing_shown:
             self._viewing_shown = True
-            self.island.show_island("Your phone is viewing this screen")
+            self.island.show_island("Your phone is viewing this screen", force=True)
         elif not viewing and self._viewing_shown:
             self._viewing_shown = False
             if not self._busy:
@@ -4687,6 +4698,9 @@ class AssistantWindow(Gtk.Window):
         SETTINGS["response_style"] = self.settings_style_combo.get_active_id() or "balanced"
         SETTINGS["memory_enabled"] = self.settings_memory_switch.get_active()
         SETTINGS["notifications_enabled"] = self.settings_notif_switch.get_active()
+        SETTINGS["island_enabled"] = self.settings_island_switch.get_active()
+        if not SETTINGS["island_enabled"]:
+            self.island.hide_island()
         accent = self.settings_accent_entry.get_text().strip()
         if len(accent) == 7 and accent.startswith("#"):
             SETTINGS["accent_color"] = accent
@@ -6296,7 +6310,7 @@ class AssistantWindow(Gtk.Window):
         self.island_expanded.close()
         if self.get_visible():
             self.island.hide_island()
-        elif SETTINGS.get("notifications_enabled", True):
+        elif SETTINGS.get("notifications_enabled", True) and SETTINGS.get("island_enabled", True):
             self._show_reply_card(text, reply_text)
 
         self.history.append({"role": "user", "content": text})

@@ -73,6 +73,7 @@ Everything after installing is one command:
 | `toby fold preview` | play the fold and unfold without suspending |
 | `toby phone on`, `pair`, `devices`, `revoke`, `reset`, `off` | pairing and managing phones |
 | `toby animations on`, `off` | Toby-style window animations |
+| `toby island on`, `off` | show or hide the Dynamic Island pill (also in Settings) |
 | `toby model`, `toby model <name>` | see or choose the local model |
 | `toby update` | pull the latest version and refresh dependencies |
 | `toby uninstall` | remove services and the command; keeps your data |
@@ -129,9 +130,10 @@ toby stop
     Tree/Bubble Image" still renders the old static images if you want a
     picture instead.
   - **Settings**: response style (concise/balanced/detailed), a toggle for
-    whether it remembers facts from chat at all, a toggle for Dynamic
-    Island notifications, an accent color, and an Ollama model override —
-    all saved to `settings.json`.
+    whether it remembers facts from chat at all, a switch to hide the
+    Dynamic Island altogether (it then only appears to say a phone is
+    viewing your screen), a toggle for its "reply ready" cards, an accent
+    color, and an Ollama model override — all saved to `settings.json`.
 - **A pill at the top of the screen** (the "Dynamic Island") appears while
   Toby is working in the background — thinking, or reading your screen.
   **Click** it to bring the panel forward; **double-click** it to open a

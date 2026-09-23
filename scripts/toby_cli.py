@@ -8,6 +8,7 @@ toby — the one command for Little Toby.
     toby fold preview       play the fold and unfold, without suspending
     toby phone on | off | pair | devices | revoke <name> | reset | status
     toby animations on | off | status
+    toby island on | off    show or hide the Dynamic Island pill
     toby model [name]       show the model in use, or choose one
     toby doctor             check everything, change nothing
     toby update             pull the latest version and refresh dependencies
@@ -304,6 +305,25 @@ def cmd_phone(args):
 # animations
 # ---------------------------------------------------------------------------
 
+def cmd_island(args):
+    action = args[0] if args else "status"
+    if action not in ("on", "off"):
+        on = load_settings().get("island_enabled", True)
+        say("The Dynamic Island is " + ("on." if on else "off.") + " Change it with: toby island on|off")
+        return 0
+    save_setting(island_enabled=(action == "on"))
+    running = run(["systemctl", "--user", "is-active", "toby.service"]).stdout.strip() == "active"
+    if running:
+        run(["systemctl", "--user", "restart", "toby.service"])
+    if action == "off":
+        say("The Dynamic Island is off. It only appears now to tell you a phone is viewing your screen.")
+    else:
+        say("The Dynamic Island is back on.")
+    if running:
+        say("Toby restarted to apply it.")
+    return 0
+
+
 def cmd_animations(args):
     import hypr_animations
     import toby_anim
@@ -404,7 +424,7 @@ def cmd_uninstall(_args):
 COMMANDS = {
     "show": cmd_show, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
     "status": cmd_status, "sleep": cmd_sleep, "fold": cmd_fold, "phone": cmd_phone,
-    "animations": cmd_animations, "model": cmd_model, "doctor": cmd_doctor,
+    "animations": cmd_animations, "island": cmd_island, "model": cmd_model, "doctor": cmd_doctor,
     "update": cmd_update, "uninstall": cmd_uninstall,
 }
 
