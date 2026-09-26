@@ -66,7 +66,25 @@ Example output: []
 """
 
 
-def _load():
+# With a notes folder set (notes.py), Toby's memory lives in your notes, in
+# <folder>/Toby/Memory.md, where you can read and edit it; knowledge.json is
+# then left as it was, as a backup. notes_root() returns that folder or None.
+notes_root = lambda: None  # noqa: E731
+
+
+def use_notes(root_getter):
+    """Keep facts in the notes folder whenever root_getter() returns one.
+    The first time, facts already in knowledge.json are copied over."""
+    global notes_root
+    notes_root = root_getter
+    root = root_getter()
+    if root is not None:
+        import notes
+        if not (notes.toby_dir(root) / notes.MEMORY_FILE).exists():
+            notes.write_memory(root, _load_json()["facts"])
+
+
+def _load_json():
     if not KNOWLEDGE_PATH.exists():
         return {"facts": []}
     try:
@@ -75,14 +93,36 @@ def _load():
         return {"facts": []}
 
 
+def _load():
+    root = notes_root()
+    if root is not None:
+        import notes
+        return {"facts": notes.read_memory(root)}
+    return _load_json()
+
+
 def _save(data):
+    root = notes_root()
+    if root is not None:
+        import notes
+        notes.write_memory(root, data["facts"])
+        return
     KNOWLEDGE_PATH.parent.mkdir(parents=True, exist_ok=True)
     KNOWLEDGE_PATH.write_text(json.dumps(data, indent=2))
 
 
+def _new_id(data, text, category):
+    if notes_root() is not None:
+        import notes
+        return notes.fact_id(text, category)
+    return _next_id(data)
+
+
 def _next_id(data):
-    n = len(data["facts"]) + 1
-    return f"f{n:04d}"
+    # the highest number in use plus one: after a delete, len()+1 could
+    # hand out an id that's still taken
+    numbers = [int(f["id"][1:]) for f in data["facts"] if str(f.get("id", ""))[1:].isdigit()]
+    return f"f{max(numbers, default=0) + 1:04d}"
 
 
 def extract_and_store(user_message: str) -> list:
@@ -120,7 +160,7 @@ def extract_and_store(user_message: str) -> list:
         if not text or text.lower() in existing_texts:
             continue
         fact = {
-            "id": _next_id(data),
+            "id": _new_id(data, text, category),
             "text": text,
             "category": category,
             "added": datetime.now().isoformat(timespec="seconds"),
@@ -464,7 +504,7 @@ def add_fact_manual(text: str, category: str) -> dict | None:
     if text.lower() in existing_texts:
         return None
     fact = {
-        "id": _next_id(data),
+        "id": _new_id(data, text, category),
         "text": text,
         "category": category,
         "added": datetime.now().isoformat(timespec="seconds"),

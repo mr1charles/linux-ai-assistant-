@@ -104,6 +104,16 @@ def check_services(r):
     else:
         r.line(WARN, "ydotoold isn't running, so mouse and keyboard control will time out",
                "systemctl --user enable --now ydotool.service")
+    try:
+        import toby_settings
+        import notes
+        root = notes.folder(toby_settings.load())
+        if root is not None:
+            import sqlite3
+            sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(a)")
+            r.line(OK, f"notes folder: {root}")
+    except Exception as e:
+        r.line(WARN, f"notes search can't run here ({e})", "your SQLite needs FTS5 (Arch's has it)")
     unit = Path.home() / ".config" / "systemd" / "user" / "toby-telegram.service"
     if unit.exists():
         state = _run(["systemctl", "--user", "is-active", "toby-telegram.service"]).stdout.strip()

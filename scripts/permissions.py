@@ -52,6 +52,9 @@ TOOL_LEVELS = {
     "show_knowledge_tree": SAFE, "show_knowledge_bubbles": SAFE,
     "add_study_note": SAFE, "enable_study_mode": SAFE, "disable_study_mode": SAFE,
     "set_school_schedule": SAFE, "disable_control": SAFE,
+    # your notes: searching them, and Toby's own pages in them (Toby/Memory.md,
+    # Toby/Notes/), which it only ever adds to
+    "search_notes": SAFE, "remember": SAFE, "add_note": SAFE,
     # changing
     "write_file": CONFIRM, "move_file": CONFIRM, "trash_files": CONFIRM,
     "run_command": CONFIRM, "open_terminal": CONFIRM, "stop_program": CONFIRM,

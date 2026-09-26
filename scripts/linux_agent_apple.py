@@ -67,6 +67,7 @@ import toby_anim
 import approvals
 import computer_tools
 import jobs
+import notes
 import notify
 import permissions
 import screen_view
@@ -163,6 +164,9 @@ inside actions, even for a single action. Each is one of:
   {{"tool": "scroll", "amount": 3, "target": "#7"}}
   {{"tool": "draw", "shape": "circle", "target": "42.50"}}
   {{"tool": "write_by_hand", "text": "Check this", "target": "#15", "where": "below", "size": 22}}
+  {{"tool": "search_notes", "query": "dentist appointment"}}
+  {{"tool": "remember", "text": "Prefers tea to coffee", "category": "food"}}
+  {{"tool": "add_note", "title": "Gift ideas", "text": "..."}}
 
 "reply" is shown to the user. "mood" reflects how the reply should feel — pick whichever fits.
 
@@ -178,7 +182,14 @@ Rules:
   disable_study_mode, set_school_schedule, system_status, list_windows, focus_window,
   list_programs, stop_program, list_files, search_files, read_file, write_file,
   move_file, trash_files, open_path, open_terminal, run_command, job_status,
-  watch_job, download_file, look_at_screen, click_on, drag, scroll, draw, write_by_hand.
+  watch_job, download_file, look_at_screen, click_on, drag, scroll, draw, write_by_hand,
+  search_notes, remember, add_note.
+- The user's own notes: search_notes searches their notes folder and returns matching
+  passages with the note's name; use it when they ask what their notes say or about
+  something they wrote down. Passages that already look relevant may be in the context
+  below; answer from them and say which note. remember keeps something the user told you
+  about themselves when they ask you to remember it. add_note saves a note they asked
+  you to write down. Never claim a note says something it doesn't.
 - Work Mode tools, for working on what's on screen like a person with a pen, mouse and
   keyboard: call look_at_screen first; it returns numbered text elements (#id) with
   positions. Then point at things by "#id", by their exact words or number ("Submit",
@@ -252,6 +263,7 @@ SYSTEM_PROMPT_STATIC = SYSTEM_PROMPT_STATIC.format()
 # before the first word appears.
 MAX_FACTS_CHARS = 900
 MAX_NOTES_CHARS = 1400
+MAX_VAULT_CHARS = 1200        # passages from your notes folder that match the request
 MAX_HISTORY_TURNS = 8
 MAX_HISTORY_MESSAGE_CHARS = 700
 
@@ -429,6 +441,72 @@ TASKS = tasks.TaskLog()
 SCREEN = screen_view.ScreenViewer()
 
 
+# Your notes folder, if you've set one (`toby notes set ~/Obsidian`): searched
+# for passages relevant to each request, and home to Toby's memory
+# (Toby/Memory.md) and daily log. See notes.py.
+_notes_index = {"root": None, "index": None, "ready": False}
+
+
+def notes_root():
+    return notes.folder(SETTINGS)
+
+
+def notes_index():
+    """The index of the notes folder, rebuilt in the background when the
+    folder changes. None while there's no folder or it's still being read."""
+    root = notes_root()
+    state = _notes_index
+    if root is None:
+        state.update(root=None, index=None, ready=False)
+        return None
+    if state["root"] != root:
+        state.update(root=root, index=None, ready=False)
+
+        def build(root=root):
+            index = notes.NotesIndex(root)
+            index.refresh(force=True)
+            if _notes_index["root"] == root:
+                _notes_index.update(index=index, ready=True)
+                print(f"NOTES: {index.stats()['files']} notes from {root} ready to search", flush=True)
+        threading.Thread(target=build, daemon=True, name="notes-index").start()
+    return state["index"] if state["ready"] else None
+
+
+def _search_notes(a):
+    root = notes_root()
+    if root is None:
+        return ("No notes folder is set up, so there's nothing to search. On the computer: "
+                "toby notes set ~/path/to/notes")
+    index = notes_index()
+    if index is None:
+        return "Toby is still reading the notes folder for the first time. Try again in a moment."
+    hits = index.search(str(a.get("query", "")), limit=6)
+    if not hits:
+        return f"Nothing in the notes matched \"{a.get('query', '')}\"."
+    return "\n".join(f"- {h['rel']}" + (f" › {h['heading']}" if h["heading"] else "") + f": {h['snippet']}"
+                     for h in hits)
+
+
+def _remember(a):
+    fact = knowledge.add_fact_manual(str(a.get("text", "")), str(a.get("category", "general")))
+    if fact is None:
+        return "Already remembered (or there was nothing to remember)."
+    where = f" in {notes.TOBY_DIR}/{notes.MEMORY_FILE}" if notes_root() else ""
+    return f"Remembered{where}: {fact['text']}"
+
+
+def _add_note(a):
+    root = notes_root()
+    if root is None:
+        return "No notes folder is set up. On the computer: toby notes set ~/path/to/notes"
+    path = notes.add_note(root, a.get("title", "Note"), str(a.get("text", "")))
+    computer_tools._touch(str(path), "write")
+    return f"Saved the note: {path.relative_to(root)}"
+
+
+knowledge.use_notes(notes_root)
+
+
 # ---------------------------------------------------------------------------
 # Pointer driver — used by Camera Mode's pinch-to-point
 #
@@ -582,6 +660,9 @@ DISPATCH = {
     "trash_files": lambda a: computer_tools.trash_files(a.get("paths") or [a.get("path", "")]),
     "open_path": lambda a: computer_tools.open_path(a.get("path", "")),
     "open_terminal": lambda a: computer_tools.open_terminal(a.get("cwd", "~"), str(a.get("command", ""))),
+    "search_notes": _search_notes,
+    "remember": _remember,
+    "add_note": _add_note,
     # run_command, download_file, job_status and watch_job need the running
     # task and the job list, so the window adds them (see _install_job_tools)
 }
@@ -589,7 +670,7 @@ DISPATCH = {
 # Tools whose results the model needs to see before it can answer: after they
 # run, Toby gets another turn with what they returned.
 FOLLOW_UP_TOOLS = {"system_status", "list_windows", "list_programs", "list_files", "search_files",
-                   "read_file", "run_command", "job_status",
+                   "read_file", "run_command", "job_status", "search_notes",
                    "look_at_screen", "click_on", "drag", "scroll", "draw", "write_by_hand"}
 MAX_TOOL_ROUNDS = 4
 MAX_WORK_MODE_ROUNDS = 10   # look, act, look again: visual work takes more turns
@@ -662,6 +743,9 @@ def describe_action(action):
         "scroll": "Scroll " + ("up" if int(action.get("amount", 3) or 3) < 0 else "down"),
         "draw": f"{str(action.get('shape', 'circle')).capitalize()} {short(action.get('target', 'it'), 22)}",
         "write_by_hand": f'Write "{short(action.get("text", ""), 22)}"',
+        "search_notes": f"Search your notes for \"{short(action.get('query', ''), 20)}\"",
+        "remember": "Remember that",
+        "add_note": f"Save a note: {short(action.get('title', ''), 22)}",
     }
     return labels.get(tool, tool.replace("_", " ").capitalize() or "Step")
 
@@ -861,7 +945,7 @@ def _clip(text, limit, what):
     return "\n".join([header] + kept) + suffix
 
 
-def _build_volatile_context():
+def _build_volatile_context(query=None):
     """Everything that can differ from one request to the next.
 
     Appended after the static prompt so the static half stays byte-identical
@@ -905,11 +989,20 @@ def _build_volatile_context():
     if notes_context:
         parts.append(notes_context)
 
+    if query and SETTINGS.get("notes_in_prompt", True):
+        try:
+            from_notes = notes.context_for(notes_index(), query, MAX_VAULT_CHARS)
+        except Exception as e:  # a notes problem must never stop Toby answering
+            print("NOTES:", e, flush=True)
+            from_notes = ""
+        if from_notes:
+            parts.append(from_notes)
+
     return "\n\n".join(parts)
 
 
-def _build_system_content():
-    return SYSTEM_PROMPT_STATIC + "\n\n" + _build_volatile_context()
+def _build_system_content(query=None):
+    return SYSTEM_PROMPT_STATIC + "\n\n" + _build_volatile_context(query)
 
 
 def _trim_history(history):
@@ -996,7 +1089,7 @@ def _maybe_upgrade_model():
 
 def think(instruction, history, on_chunk=None, cancel_check=None):
     _maybe_upgrade_model()
-    system_content = _build_system_content()
+    system_content = _build_system_content(instruction)
     messages = [{"role": "system", "content": system_content}]
     messages.extend(_trim_history(history))
     messages.append({"role": "user", "content": instruction})
@@ -1088,7 +1181,7 @@ def think_cloud(instruction, history, on_chunk=None, cancel_check=None):
     if not api_key:
         return {"actions": [], "reply": "No cloud API key set — add one in Settings first.", "mood": "concerned"}
 
-    system_content = _build_system_content()
+    system_content = _build_system_content(instruction)
     messages = [{"role": "system", "content": system_content}]
     messages.extend(_trim_history(history))
     messages.append({"role": "user", "content": instruction})
@@ -3822,6 +3915,15 @@ class AssistantWindow(Gtk.Window):
         notif_switch_row.pack_end(self.settings_notif_switch, False, False, 0)
         settings_page.pack_start(notif_switch_row, False, False, 0)
 
+        notes_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        notes_row.pack_start(Gtk.Label(label="Notes folder"), False, False, 0)
+        self.settings_notes_entry = Gtk.Entry()
+        self.settings_notes_entry.set_text(SETTINGS.get("notes_folder", ""))
+        self.settings_notes_entry.set_placeholder_text("e.g. ~/Obsidian (empty: none)")
+        self.settings_notes_entry.set_width_chars(24)
+        notes_row.pack_start(self.settings_notes_entry, True, True, 0)
+        settings_page.pack_start(notes_row, False, False, 0)
+
         accent_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         accent_row.pack_start(Gtk.Label(label="Accent color (hex)"), False, False, 0)
         self.settings_accent_entry = Gtk.Entry()
@@ -4701,6 +4803,16 @@ class AssistantWindow(Gtk.Window):
         SETTINGS["memory_enabled"] = self.settings_memory_switch.get_active()
         SETTINGS["notifications_enabled"] = self.settings_notif_switch.get_active()
         SETTINGS["island_enabled"] = self.settings_island_switch.get_active()
+        folder = self.settings_notes_entry.get_text().strip()
+        if folder != SETTINGS.get("notes_folder", ""):
+            if folder and notes.folder({"notes_folder": folder}) is None:
+                self.settings_notes_entry.set_text(SETTINGS.get("notes_folder", ""))
+                print(f"NOTES: {folder} isn't a folder; kept the old setting", flush=True)
+            else:
+                SETTINGS["notes_folder"] = folder
+                knowledge.use_notes(notes_root)     # memory moves into the notes (a copy, first time)
+                notes_index()
+                self.refresh_memory_graph()
         if not SETTINGS["island_enabled"]:
             self.island.hide_island()
         accent = self.settings_accent_entry.get_text().strip()
@@ -6261,6 +6373,13 @@ class AssistantWindow(Gtk.Window):
         errored = any(st["status"] == "error" for st in steps)
         state = "cancelled" if cancelled else ("failed" if errored and not actions_succeeded else "completed")
         task = TASKS.finish(task_id, state, reply)
+        root = notes_root()
+        if task and root is not None and SETTINGS.get("notes_daily_log", True):
+            try:
+                word = {"completed": "", "failed": " (couldn't finish)", "cancelled": " (stopped)"}[state]
+                notes.log(root, f"{task['text'][:100]}{word}: {(reply or '').strip()[:160]}")
+            except OSError as e:
+                print("NOTES: couldn't write the daily log:", e, flush=True)
         if self._task_origin.startswith("phone") and task:
             if state == "completed":
                 self._event("task_done", "Done: " + task["text"][:60], (reply or "")[:200])
@@ -6592,6 +6711,7 @@ class AssistantWindow(Gtk.Window):
 def main():
     apply_model_settings()
     warm_up_model()
+    notes_index()                   # start reading the notes folder, if there is one
     ring = RingFlash()
     win = AssistantWindow(ring)
 

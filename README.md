@@ -75,6 +75,7 @@ Everything after installing is one command:
 | `toby animations on`, `off` | Toby-style window animations |
 | `toby island on`, `off` | show or hide the Dynamic Island pill (also in Settings) |
 | `toby telegram setup`, `pair`, `status`, `off` | talk to Toby through your own Telegram bot |
+| `toby notes set <folder>`, `status`, `search`, `off` | use your notes folder (e.g. Obsidian) as Toby's memory |
 | `toby model`, `toby model <name>` | see or choose the local model |
 | `toby update` | pull the latest version and refresh dependencies |
 | `toby uninstall` | remove services and the command; keeps your data |
@@ -425,6 +426,20 @@ It only makes outgoing connections, and it goes through the same permission
 levels as the app. Telegram bot chats aren't end-to-end encrypted, so
 screenshots are never sent unless you allow it. See
 [docs/TELEGRAM.md](docs/TELEGRAM.md).
+
+## Your notes as Toby's memory
+
+`toby notes set ~/Obsidian` (or Settings, Notes folder) points Toby at your
+Markdown notes. When you ask something they might answer, Toby searches
+them and answers from the passages it finds, naming the note. What it
+learns about you lives in `Toby/Memory.md` in your notes, a plain list you
+can edit in your notes app (delete a line and Toby forgets it). Each task
+gets a line in `Toby/Log/<date>.md`, and notes you ask it to make go in
+`Toby/Notes/`. Folders that look private (Private, Passwords, Finance,
+Health…), hidden folders and anything in a `.tobyignore` file are never
+read, and anything that looks like a password or key is hidden from the
+model. The search is local (SQLite full-text search, no AI model, no new
+packages). See [docs/NOTES.md](docs/NOTES.md).
 
 ## Work Mode
 

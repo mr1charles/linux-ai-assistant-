@@ -33,6 +33,10 @@ remote.tmp
 telegram.json
 telegram.tmp
 
+# The search index of your notes: passages of your own notes, personal
+notes_index.sqlite
+notes_index.sqlite-*
+
 # Toby's private Python environment (install.sh creates it)
 .venv/
 

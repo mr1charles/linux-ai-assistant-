@@ -10,6 +10,7 @@ toby — the one command for Little Toby.
     toby animations on | off | status
     toby island on | off    show or hide the Dynamic Island pill
     toby telegram setup | pair | status | unpair <name> | off
+    toby notes set <folder> | off | status | search <words>
     toby model [name]       show the model in use, or choose one
     toby doctor             check everything, change nothing
     toby update             pull the latest version and refresh dependencies
@@ -433,6 +434,70 @@ def cmd_telegram(args, ask=input, secret=None):
     return 0
 
 
+# ---------------------------------------------------------------------------
+# notes
+# ---------------------------------------------------------------------------
+
+def _count(n, word):
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def cmd_notes(args):
+    import knowledge
+    import notes
+
+    action = args[0] if args else "status"
+    settings = load_settings()
+    if action == "set":
+        raw = " ".join(args[1:]).strip()
+        if not raw or notes.folder({"notes_folder": raw}) is None:
+            say("Name a folder that exists, e.g.: toby notes set ~/Obsidian")
+            return 1
+        root = notes.folder({"notes_folder": raw})
+        save_setting(notes_folder=raw)
+        knowledge.use_notes(lambda: root)
+        say(f"Reading your notes in {root}…")
+        index = notes.NotesIndex(root)
+        index.refresh(force=True)
+        stats = index.stats()
+        say(f"Toby can search {_count(stats['files'], 'note')} ({_count(stats['passages'], 'passage')})."
+            + (f" {stats['too_big']} were too big to read." if stats["too_big"] else ""))
+        say(f"Toby's memory is now {root / notes.TOBY_DIR / notes.MEMORY_FILE}; edit it freely.")
+        say("Private-looking folders are skipped; list more in a .tobyignore file there.")
+        if _service_active("toby.service"):
+            run(["systemctl", "--user", "restart", "toby.service"])
+            say("Toby restarted to use them.")
+        return 0
+    if action == "off":
+        save_setting(notes_folder="")
+        if _service_active("toby.service"):
+            run(["systemctl", "--user", "restart", "toby.service"])
+        say("Toby no longer reads your notes, and remembers things in ~/linux-agent/knowledge.json again.")
+        say("Nothing in your notes folder was changed or deleted.")
+        return 0
+    root = notes.folder(settings)
+    if root is None:
+        say("No notes folder is set. Set one with: toby notes set ~/Obsidian")
+        return 0 if action == "status" else 1
+    index = notes.NotesIndex(root)
+    if action == "search":
+        query = " ".join(args[1:])
+        hits = index.search(query, limit=8)
+        if not hits:
+            say("Nothing matched.")
+        for h in hits:
+            say(f"{h['rel']}" + (f" › {h['heading']}" if h["heading"] else ""))
+            say(f"    {h['snippet']}")
+        return 0
+    index.refresh(force=True)
+    stats = index.stats()
+    say(f"notes folder        {root}")
+    say(f"searchable          {_count(stats['files'], 'note')}, {_count(stats['passages'], 'passage')}")
+    say(f"memory              {root / notes.TOBY_DIR / notes.MEMORY_FILE}")
+    say(f"daily log           {'on' if settings.get('notes_daily_log', True) else 'off'}")
+    return 0
+
+
 def cmd_island(args):
     action = args[0] if args else "status"
     if action not in ("on", "off"):
@@ -552,7 +617,7 @@ def cmd_uninstall(_args):
 COMMANDS = {
     "show": cmd_show, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
     "status": cmd_status, "sleep": cmd_sleep, "fold": cmd_fold, "phone": cmd_phone,
-    "animations": cmd_animations, "island": cmd_island, "telegram": cmd_telegram,
+    "animations": cmd_animations, "island": cmd_island, "telegram": cmd_telegram, "notes": cmd_notes,
     "model": cmd_model, "doctor": cmd_doctor,
     "update": cmd_update, "uninstall": cmd_uninstall,
 }

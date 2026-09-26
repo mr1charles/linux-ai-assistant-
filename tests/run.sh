@@ -61,6 +61,12 @@ echo "== memory graph layout checks =="
 echo "== phone bridge checks =="
 timeout 90 "$PY" tests/test_remote_bridge.py || status=1
 
+echo "== notes as memory =="
+tmp_home="$(make_home)"
+HOME="$tmp_home" timeout 60 "$PY" tests/test_notes.py || status=1
+HOME="$tmp_home" timeout 120 "$PY" tests/test_notes_app.py || status=1
+rm -rf "$tmp_home"
+
 echo "== telegram =="
 tmp_home="$(make_home)"
 HOME="$tmp_home" timeout 180 "$PY" tests/test_telegram.py || status=1

@@ -53,6 +53,11 @@ DEFAULTS = {
     "remote_port": 8765,
     "remote_bind": "127.0.0.1",        # loopback only; Tailscale serve publishes it privately
 
+    # -- your notes (see docs/NOTES.md) ----------------------------------------
+    "notes_folder": "",                # "" = none; e.g. "~/Obsidian". `toby notes set <folder>`
+    "notes_in_prompt": True,           # put passages that match a request in front of the model
+    "notes_daily_log": True,           # a line per task in <folder>/Toby/Log/<date>.md
+
     # -- Telegram (see docs/TELEGRAM.md) ---------------------------------------
     "telegram_enabled": False,         # set by `toby telegram setup`
     "telegram_screenshots": False,     # /screen sends a screenshot through Telegram's servers; opt in
