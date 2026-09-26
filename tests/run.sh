@@ -61,6 +61,12 @@ echo "== memory graph layout checks =="
 echo "== phone bridge checks =="
 timeout 90 "$PY" tests/test_remote_bridge.py || status=1
 
+echo "== telegram =="
+tmp_home="$(make_home)"
+HOME="$tmp_home" timeout 180 "$PY" tests/test_telegram.py || status=1
+HOME="$tmp_home" timeout 120 "$PY" tests/test_telegram_cli.py || status=1
+rm -rf "$tmp_home"
+
 echo "== permission levels =="
 "$PY" tests/test_permissions.py || status=1
 
@@ -126,6 +132,7 @@ if command -v xvfb-run >/dev/null 2>&1; then
     tmp_home="$(make_home)"
     HOME="$tmp_home" xvfb-run -a "$PY" tests/smoke_headless.py || status=1
     HOME="$tmp_home" xvfb-run -a "$PY" tests/test_island_setting.py || status=1
+    HOME="$tmp_home" xvfb-run -a "$PY" tests/test_bridge_for_telegram.py || status=1
     rm -rf "$tmp_home"
 else
     echo "   skipped: xvfb-run not installed"

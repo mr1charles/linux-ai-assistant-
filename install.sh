@@ -180,6 +180,12 @@ ln -sf "$REPO/bin/toby" "$HOME/.local/bin/toby"
 for unit in toby.service toby-fold.service; do
   sed "s|@REPO@|$REPO|g" "$REPO/systemd/$unit" > "$HOME/.config/systemd/user/$unit"
 done
+# Telegram's service exists only once you've set it up (`toby telegram setup`);
+# refresh it so it points at this copy of the code.
+if [ -f "$HOME/.config/systemd/user/toby-telegram.service" ]; then
+  sed "s|@REPO@|$REPO|g" "$REPO/systemd/toby-telegram.service" > "$HOME/.config/systemd/user/toby-telegram.service"
+  systemctl --user try-restart toby-telegram.service 2>/dev/null || true
+fi
 started=1
 systemctl --user daemon-reload 2>/dev/null || started=0
 systemctl --user enable toby.service toby-fold.service >/dev/null 2>&1 || started=0

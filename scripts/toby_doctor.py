@@ -16,6 +16,7 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 
 OK, WARN, BAD = "ok", "warn", "fail"
 
@@ -103,6 +104,16 @@ def check_services(r):
     else:
         r.line(WARN, "ydotoold isn't running, so mouse and keyboard control will time out",
                "systemctl --user enable --now ydotool.service")
+    unit = Path.home() / ".config" / "systemd" / "user" / "toby-telegram.service"
+    if unit.exists():
+        state = _run(["systemctl", "--user", "is-active", "toby-telegram.service"]).stdout.strip()
+        if state == "active":
+            r.line(OK, "toby-telegram.service is running")
+        else:
+            r.line(WARN, f"toby-telegram.service is {state or 'not running'}",
+                   "see why with: journalctl --user -u toby-telegram -n 20")
+        if not shutil.which("ffmpeg"):
+            r.line(WARN, "ffmpeg not found, so Telegram voice notes can't be understood", "sudo pacman -S ffmpeg")
 
 
 def check_model(r):

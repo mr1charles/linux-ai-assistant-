@@ -29,6 +29,10 @@ tasks.tmp
 remote.json
 remote.tmp
 
+# The Telegram bot's token and Toby's token for it — live credentials
+telegram.json
+telegram.tmp
+
 # Toby's private Python environment (install.sh creates it)
 .venv/
 

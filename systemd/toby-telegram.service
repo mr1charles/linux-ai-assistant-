@@ -1,0 +1,19 @@
+[Unit]
+Description=Little Toby on Telegram
+Documentation=file://@REPO@/docs/TELEGRAM.md
+After=network-online.target toby.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# It talks to Toby and to Telegram, not to the desktop, so it doesn't wait
+# for Hyprland like Toby's other parts do.
+Environment=TOBY_NO_DESKTOP=1
+ExecStart=@REPO@/scripts/toby-session.sh telegram_bot.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

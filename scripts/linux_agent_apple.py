@@ -4315,7 +4315,9 @@ class AssistantWindow(Gtk.Window):
         self._last_remote_publish = 0.0
         self._viewing_shown = False
         self._watch_power()
-        if not SETTINGS.get("remote_enabled"):
+        # Telegram talks to Toby through the same connection, on this
+        # computer only, so it runs for either (`toby telegram setup`).
+        if not (SETTINGS.get("remote_enabled") or SETTINGS.get("telegram_enabled")):
             return
         try:
             store = remote_bridge.DeviceStore()

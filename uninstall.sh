@@ -3,8 +3,9 @@
 # settings, downloaded models and this folder, so reinstalling picks up
 # exactly where you left off. Delete ~/linux-agent yourself to remove those.
 set -u
-systemctl --user disable --now toby.service toby-fold.service 2>/dev/null
-rm -f "$HOME/.config/systemd/user/toby.service" "$HOME/.config/systemd/user/toby-fold.service"
+systemctl --user disable --now toby.service toby-fold.service toby-telegram.service 2>/dev/null
+rm -f "$HOME/.config/systemd/user/toby.service" "$HOME/.config/systemd/user/toby-fold.service" \
+      "$HOME/.config/systemd/user/toby-telegram.service"
 systemctl --user daemon-reload 2>/dev/null
 rm -f "$HOME/.local/bin/toby"
 command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1   # drops Toby's runtime keybind and animations

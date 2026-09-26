@@ -9,6 +9,7 @@ toby — the one command for Little Toby.
     toby phone on | off | pair | devices | revoke <name> | reset | status
     toby animations on | off | status
     toby island on | off    show or hide the Dynamic Island pill
+    toby telegram setup | pair | status | unpair <name> | off
     toby model [name]       show the model in use, or choose one
     toby doctor             check everything, change nothing
     toby update             pull the latest version and refresh dependencies
@@ -32,6 +33,12 @@ REPO = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 
 SERVICES = ("toby.service", "toby-fold.service")
+TELEGRAM_UNIT = Path.home() / ".config" / "systemd" / "user" / "toby-telegram.service"
+
+
+def services():
+    """Toby's services, with Telegram's once it's been set up."""
+    return SERVICES + (("toby-telegram.service",) if TELEGRAM_UNIT.exists() else ())
 
 
 def say(text=""):
@@ -86,7 +93,7 @@ def cmd_show(_args):
 
 
 def cmd_start(_args):
-    out = run(["systemctl", "--user", "start", *SERVICES])
+    out = run(["systemctl", "--user", "start", *services()])
     if out.returncode:
         say("Couldn't start Toby's services: " + (out.stderr.strip() or "unknown error"))
         say("If you haven't installed yet, run ./install.sh from the project folder.")
@@ -96,19 +103,19 @@ def cmd_start(_args):
 
 
 def cmd_stop(_args):
-    run(["systemctl", "--user", "stop", *SERVICES])
+    run(["systemctl", "--user", "stop", *services()])
     say("Toby has stopped. Your notes and settings are untouched.")
     return 0
 
 
 def cmd_restart(_args):
-    run(["systemctl", "--user", "restart", *SERVICES])
+    run(["systemctl", "--user", "restart", *services()])
     say("Toby restarted.")
     return 0
 
 
 def cmd_status(_args):
-    for service in SERVICES:
+    for service in services():
         state = run(["systemctl", "--user", "is-active", service]).stdout.strip() or "unknown"
         say(f"{service:<20} {state}")
     settings = load_settings()
@@ -118,6 +125,7 @@ def cmd_status(_args):
     model = model_picker.pick(settings.get("ollama_model", ""), os.environ.get("OLLAMA_MODEL", ""), installed)
     say(f"{'model':<20} {model}" + ("" if installed else "  (Ollama not reachable)"))
     say(f"{'phone app':<20} {'on' if settings.get('remote_enabled') else 'off'}")
+    say(f"{'telegram':<20} {'on' if settings.get('telegram_enabled') else 'off'}")
     return 0
 
 
@@ -305,6 +313,126 @@ def cmd_phone(args):
 # animations
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Telegram
+# ---------------------------------------------------------------------------
+
+def _service_active(name):
+    return run(["systemctl", "--user", "is-active", name]).stdout.strip() == "active"
+
+
+def _install_telegram_unit():
+    TELEGRAM_UNIT.parent.mkdir(parents=True, exist_ok=True)
+    text = (REPO / "systemd" / "toby-telegram.service").read_text().replace("@REPO@", str(REPO))
+    TELEGRAM_UNIT.write_text(text)
+    run(["systemctl", "--user", "daemon-reload"])
+
+
+def cmd_telegram(args, ask=input, secret=None):
+    import getpass
+    import remote_bridge
+    import telegram_bot as tb
+
+    secret = secret or getpass.getpass
+    action = args[0] if args else "status"
+    config = tb.load_config()
+
+    if action == "setup":
+        say("Toby on Telegram: talk to Toby from any phone with Telegram, no app to install.")
+        say("Good to know: Telegram bot chats aren't end-to-end encrypted; Telegram's servers carry")
+        say("them. For a fully private connection use the phone app over Tailscale (toby phone on).")
+        say()
+        token = config.get("bot_token", "")
+        if token and config.get("bot_username"):
+            keep = ask(f"Keep using your bot @{config['bot_username']}? [Y/n] ").strip().lower()
+            if keep in ("n", "no"):
+                token = ""
+        if not token:
+            say("1. In Telegram, open @BotFather, send /newbot, and choose a name.")
+            say("2. BotFather replies with a token like 123456789:AAF... Paste it here.")
+            say("   (It isn't shown as you type. Anyone with it can pretend to be your bot, so keep it private.)")
+            token = secret("Bot token: ").strip()
+        api = tb.TelegramAPI(token, config.get("api_base", tb.API_BASE))
+        try:
+            me = api.call("getMe")
+        except tb.TelegramError as e:
+            say(f"Telegram didn't accept that token ({e.description}). Nothing was changed.")
+            return 1
+        store = remote_bridge.DeviceStore()
+        if config.get("device_id"):
+            store.revoke(config["device_id"])
+        device, device_token = store.add(f"Telegram (@{me.get('username', 'bot')})", "telegram", tb.new_device_id())
+        config.update(bot_token=token, bot_username=me.get("username", ""), device_token=device_token,
+                      device_id=device["id"])
+        config.setdefault("allowed_users", [])
+        tb.save_config(config)
+        save_setting(telegram_enabled=True)
+        run(["systemctl", "--user", "stop", "toby-telegram.service"])
+        if _service_active("toby.service"):
+            run(["systemctl", "--user", "restart", "toby.service"])     # starts Toby's side of it
+        say(f"Your bot is @{config['bot_username']}.")
+        if not config["allowed_users"] or ask("Pair another Telegram account? [y/N] ").strip().lower() in ("y", "yes"):
+            say()
+            tb.pair_account(api, config, ask=ask, say=say)
+            config = tb.load_config()
+        _install_telegram_unit()
+        out = run(["systemctl", "--user", "enable", "--now", "toby-telegram.service"])
+        if out.returncode:
+            say("Couldn't start the Telegram service: " + (out.stderr.strip() or "unknown error"))
+            return 1
+        who = ", ".join(u.get("name", str(u["id"])) for u in config.get("allowed_users", [])) or "nobody yet"
+        say(f"Toby is listening on Telegram as @{config['bot_username']}, for: {who}.")
+        return 0
+
+    if not config.get("bot_token"):
+        say("Telegram isn't set up. Run: toby telegram setup")
+        return 1
+
+    if action == "pair":
+        was_running = _service_active("toby-telegram.service")
+        run(["systemctl", "--user", "stop", "toby-telegram.service"])      # only one reader of the bot's messages
+        try:
+            tb.pair_account(tb.TelegramAPI(config["bot_token"], config.get("api_base", tb.API_BASE)),
+                            config, ask=ask, say=say)
+        finally:
+            if was_running or TELEGRAM_UNIT.exists():
+                run(["systemctl", "--user", "start", "toby-telegram.service"])
+        return 0
+
+    if action == "unpair":
+        name = " ".join(args[1:]).strip().lower()
+        users = config.get("allowed_users", [])
+        keep = [u for u in users if name not in (str(u["id"]), u.get("name", "").lower())]
+        if not name or len(keep) == len(users):
+            say("Name one account exactly as `toby telegram status` lists it (or its id).")
+            return 1
+        config["allowed_users"] = keep
+        tb.save_config(config)
+        say("Unpaired. That Telegram account can't reach Toby any more.")
+        return 0
+
+    if action == "off":
+        run(["systemctl", "--user", "disable", "--now", "toby-telegram.service"])
+        if config.get("device_id"):
+            remote_bridge.DeviceStore().revoke(config["device_id"])
+        config.pop("device_token", None)
+        config.pop("device_id", None)
+        tb.save_config(config)
+        save_setting(telegram_enabled=False)
+        if _service_active("toby.service"):
+            run(["systemctl", "--user", "restart", "toby.service"])
+        say("Telegram is off: the bot can't reach Toby. `toby telegram setup` turns it back on.")
+        return 0
+
+    enabled = load_settings().get("telegram_enabled") and config.get("device_token")
+    say(f"bot                 @{config.get('bot_username', '?')}")
+    say(f"telegram            {'on' if enabled else 'off'}")
+    say(f"service             {run(['systemctl', '--user', 'is-active', 'toby-telegram.service']).stdout.strip() or 'not installed'}")
+    users = config.get("allowed_users", [])
+    say("accounts            " + (", ".join(f"{u.get('name', '?')} ({u['id']})" for u in users) or "none paired"))
+    return 0
+
+
 def cmd_island(args):
     action = args[0] if args else "status"
     if action not in ("on", "off"):
@@ -424,7 +552,8 @@ def cmd_uninstall(_args):
 COMMANDS = {
     "show": cmd_show, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
     "status": cmd_status, "sleep": cmd_sleep, "fold": cmd_fold, "phone": cmd_phone,
-    "animations": cmd_animations, "island": cmd_island, "model": cmd_model, "doctor": cmd_doctor,
+    "animations": cmd_animations, "island": cmd_island, "telegram": cmd_telegram,
+    "model": cmd_model, "doctor": cmd_doctor,
     "update": cmd_update, "uninstall": cmd_uninstall,
 }
 

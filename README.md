@@ -18,8 +18,8 @@ it from your phone, from anywhere, and watch it work.
 Everything runs on a local model through [Ollama](https://ollama.com) —
 **fully offline by default.** The only things that touch the network are
 things that inherently must: a Discord message, an email check, a site you
-asked it to open, or your own phone reaching your own laptop over your own
-private Tailscale network.
+asked it to open, your own phone reaching your own laptop over your own
+private Tailscale network, or, if you set it up, your own Telegram bot.
 
 When the laptop goes to sleep, the desktop folds shut toward the hinge like
 a foldable phone; when you open it again, it unfolds.
@@ -74,6 +74,7 @@ Everything after installing is one command:
 | `toby phone on`, `pair`, `devices`, `revoke`, `reset`, `off` | pairing and managing phones |
 | `toby animations on`, `off` | Toby-style window animations |
 | `toby island on`, `off` | show or hide the Dynamic Island pill (also in Settings) |
+| `toby telegram setup`, `pair`, `status`, `off` | talk to Toby through your own Telegram bot |
 | `toby model`, `toby model <name>` | see or choose the local model |
 | `toby update` | pull the latest version and refresh dependencies |
 | `toby uninstall` | remove services and the command; keeps your data |
@@ -412,6 +413,18 @@ and you can unpair any phone from the computer (`toby phone devices`,
 `toby phone revoke <name>`, or the Unpair button), from another phone, or
 by logging out on the phone itself. `toby phone reset` unpairs them all;
 `toby phone off` turns the whole thing off.
+
+### Or through Telegram
+
+No app to install: `toby telegram setup` connects Toby to a Telegram bot of
+your own (BotFather makes one in a minute), and only the Telegram accounts
+you confirm at the computer can use it. You get the same thing as the app:
+live task steps, **Allow** / **Don't allow** buttons, the reply, `/status`,
+`/stop`, notifications, and voice notes turned into text on your computer.
+It only makes outgoing connections, and it goes through the same permission
+levels as the app. Telegram bot chats aren't end-to-end encrypted, so
+screenshots are never sent unless you allow it. See
+[docs/TELEGRAM.md](docs/TELEGRAM.md).
 
 ## Work Mode
 

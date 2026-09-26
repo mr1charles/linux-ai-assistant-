@@ -52,6 +52,10 @@ DEFAULTS = {
     "remote_enabled": False,           # the phone app bridge — off until you pair a phone
     "remote_port": 8765,
     "remote_bind": "127.0.0.1",        # loopback only; Tailscale serve publishes it privately
+
+    # -- Telegram (see docs/TELEGRAM.md) ---------------------------------------
+    "telegram_enabled": False,         # set by `toby telegram setup`
+    "telegram_screenshots": False,     # /screen sends a screenshot through Telegram's servers; opt in
 }
 
 GRADE_LEVELS = ["5th-6th", "7th-8th", "9th-10th", "11th-12th", "College"]
