@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Little Toby</title>
+<meta name="description" content="A local, offline AI assistant for Linux with a little animated character. Ask it things, let it do things on your computer, and talk to it from your phone.">
+<meta property="og:title" content="Little Toby">
+<meta property="og:description" content="A local, offline AI assistant for Linux (Hyprland) with a character. Free and open source, with iPhone and Android apps.">
+<meta property="og:image" content="https://mr1charles.github.io/linux-ai-assistant-/og.png">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<style>
+:root {
+  --bg: #0b0c17; --bg2: #13142b; --card: #1b1d44; --line: #2b2e63;
+  --text: #f4f4fb; --muted: #a9abc9; --accent: #ffa626; --accent2: #ffd95a; --blue: #8ab4ff;
+  --code: #0f1024;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --bg: #fbf8f1; --bg2: #f3eee2; --card: #ffffff; --line: #e6dfcf;
+    --text: #1c1a2e; --muted: #5d5a73; --accent: #d97a00; --accent2: #b88700; --blue: #3a64c8;
+    --code: #f1ece0;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+}
+a { color: var(--blue); }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 20px; }
+header.hero {
+  padding: 72px 0 56px; text-align: center;
+  background: radial-gradient(ellipse at 50% 0%, var(--card), transparent 70%);
+}
+.face { width: 132px; height: 132px; border-radius: 32px; box-shadow: 0 12px 40px rgba(255,166,38,.25);
+  animation: bob 3.2s ease-in-out infinite; }
+@keyframes bob { 50% { transform: translateY(-8px) rotate(-2deg); } }
+@media (prefers-reduced-motion: reduce) { .face { animation: none; } }
+h1 { font-size: clamp(40px, 8vw, 64px); line-height: 1.05; margin: 22px 0 10px; letter-spacing: -.02em; }
+.tag { font-size: clamp(18px, 3vw, 22px); color: var(--muted); max-width: 640px; margin: 0 auto; }
+.pills { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 22px 0 30px; }
+.pill { border: 1px solid var(--line); border-radius: 99px; padding: 4px 12px; font-size: 14px; color: var(--muted); }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
+.btn { display: inline-flex; align-items: center; gap: 8px; padding: 13px 22px; border-radius: 99px;
+  font-weight: 600; text-decoration: none; border: 1px solid var(--line); color: var(--text); background: var(--card); }
+.btn.primary { background: var(--accent); color: #1a1205; border-color: transparent; }
+.btn:hover { filter: brightness(1.08); }
+section { padding: 56px 0; border-top: 1px solid var(--line); }
+h2 { font-size: clamp(26px, 5vw, 36px); margin: 0 0 8px; letter-spacing: -.01em; }
+.sub { color: var(--muted); margin: 0 0 28px; max-width: 700px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 20px; }
+.card h3 { margin: 0 0 6px; font-size: 18px; }
+.card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+.ico { font-size: 26px; line-height: 1; margin-bottom: 10px; display: block; }
+pre { background: var(--code); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px;
+  overflow-x: auto; font: 14.5px/1.5 ui-monospace, "JetBrains Mono", Menlo, monospace; margin: 0; }
+.copyrow { position: relative; }
+.copy { position: absolute; top: 10px; right: 10px; font: 600 13px system-ui; padding: 6px 12px; border-radius: 99px;
+  border: 1px solid var(--line); background: var(--card); color: var(--text); cursor: pointer; }
+ol.steps { padding-left: 22px; margin: 0; } ol.steps li { margin: 6px 0; }
+.apps { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+.apps .card { display: flex; flex-direction: column; gap: 12px; }
+.apps .btn { align-self: flex-start; }
+.small { font-size: 14.5px; color: var(--muted); }
+.note { border-left: 3px solid var(--accent); padding: 4px 0 4px 16px; color: var(--muted); }
+code { font-family: ui-monospace, Menlo, monospace; font-size: .92em; background: var(--code); padding: 1px 6px; border-radius: 6px; }
+footer { padding: 36px 0 60px; color: var(--muted); font-size: 14.5px; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <img class="face" src="icon.svg" alt="Toby's face: a round yellow character with a little antenna">
+    <h1>Little Toby</h1>
+    <p class="tag">A little AI that lives on your Linux desktop. Ask it something and it answers. Ask it to <em>do</em> something and it walks out and does it.</p>
+    <div class="pills">
+      <span class="pill">Free &amp; open source</span>
+      <span class="pill">Runs offline on your computer</span>
+      <span class="pill">iPhone &amp; Android apps</span>
+      <span class="pill">Telegram bot</span>
+    </div>
+    <div class="cta">
+      <a class="btn primary" href="#install">Install on Linux</a>
+      <a class="btn" href="#phone">Get the phone app</a>
+      <a class="btn" href="https://github.com/mr1charles/linux-ai-assistant-">View on GitHub</a>
+    </div>
+  </div>
+</header>
+
+<main>
+<section>
+  <div class="wrap">
+    <h2>What it does</h2>
+    <p class="sub">Press <strong>Super+G</strong> and a small face wakes up in a glowing ring at the bottom of your screen. When it has work to do, it grows a little body, walks across the screen carrying your pointer, ticks off each step, then cheers and hops back home.</p>
+    <div class="grid">
+      <div class="card"><span class="ico">💬</span><h3>Answers questions</h3><p>Talk or type. It runs on a local model through Ollama, so your questions never leave your computer.</p></div>
+      <div class="card"><span class="ico">🖱️</span><h3>Does things for you</h3><p>Opens apps and sites, closes windows, moves and tidies files, runs commands, and clicks and types with your OK.</p></div>
+      <div class="card"><span class="ico">👀</span><h3>Reads your screen</h3><p>Work Mode sees what's on screen and works on it the way you would, then checks it actually worked.</p></div>
+      <div class="card"><span class="ico">🔒</span><h3>Asks before changing things</h3><p>Looking is instant. Changing something asks first, by button or fingerprint. Risky things are off unless you turn them on.</p></div>
+      <div class="card"><span class="ico">🌙</span><h3>Works overnight</h3><p>Write tasks in a queue and Toby works through them while the computer is awake, then leaves notes in an Outbox.</p></div>
+      <div class="card"><span class="ico">📓</span><h3>Uses your notes</h3><p>Point it at your notes folder (like Obsidian) and it remembers what you've written, and logs what it did.</p></div>
+      <div class="card"><span class="ico">📱</span><h3>Phone &amp; Telegram</h3><p>Ask from anywhere, watch each step live, and approve actions with a tap, over your own private Tailscale network.</p></div>
+      <div class="card"><span class="ico">💻</span><h3>A laptop that folds</h3><p>When the lid closes, the desktop folds shut toward the hinge like a foldable phone, and unfolds when you open it.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <h2>Install on Linux</h2>
+    <p class="sub">Made for <strong>Arch / CachyOS with Hyprland</strong>. One command, one password prompt. It installs everything into its own folder and starts at login.</p>
+    <div class="copyrow">
+      <pre id="cmd">curl -fsSL https://raw.githubusercontent.com/mr1charles/linux-ai-assistant-/main/install.sh | bash</pre>
+      <button class="copy" data-copy="cmd">Copy</button>
+    </div>
+    <p class="small" style="margin-top:14px">Then press <strong>Super+G</strong>, or run <code>toby</code>. Check everything with <code>toby doctor</code>, and update later with <code>toby update</code>. For the phone apps, add Tailscale: <code>… | bash -s -- --phone</code>. Other distros: install the packages listed in <a href="https://github.com/mr1charles/linux-ai-assistant-/blob/main/install.sh">install.sh</a> and run it with <code>SKIP_SYSTEM_PACKAGES=1</code>.</p>
+  </div>
+</section>
+
+<section id="phone">
+  <div class="wrap">
+    <h2>The phone app</h2>
+    <p class="sub">Talk to Toby on your computer from anywhere, see each task's steps as they happen, and approve anything that needs your OK. Your phone reaches your own computer over <a href="https://tailscale.com">Tailscale</a>, a free private network, so nothing is opened to the internet.</p>
+    <div class="apps">
+      <div class="card">
+        <h3>Android</h3>
+        <ol class="steps small">
+          <li>Download the APK and open it. Allow installing from your browser if Android asks.</li>
+          <li>Install Tailscale on the phone and sign in with the same account as the computer.</li>
+          <li>On the computer run <code>toby phone on</code>, then paste its link into the app.</li>
+        </ol>
+        <a class="btn primary" href="https://github.com/mr1charles/linux-ai-assistant-/releases/latest/download/LittleToby.apk">Download for Android</a>
+      </div>
+      <div class="card">
+        <h3>iPhone</h3>
+        <ol class="steps small">
+          <li>Download the IPA and install it with your own Apple ID using a sideloading tool: <a href="https://github.com/khcrysalis/Impactor">Plume Impactor</a> (Linux), <a href="https://altstore.io">AltStore</a> or <a href="https://sideloadly.io">Sideloadly</a>.</li>
+          <li>Turn on Developer Mode, and trust your Apple ID in Settings.</li>
+          <li>Run <code>toby phone on</code> and scan the code in the app.</li>
+        </ol>
+        <a class="btn primary" href="https://github.com/mr1charles/linux-ai-assistant-/releases/latest/download/LittleToby-unsigned.ipa">Download for iPhone</a>
+        <p class="small">It isn't on the App Store, so with a free Apple ID it needs re-signing every 7 days (the tools can do it for you). <a href="https://github.com/mr1charles/linux-ai-assistant-/blob/main/docs/COMPANION.md">Full guide</a></p>
+      </div>
+      <div class="card">
+        <h3>Telegram</h3>
+        <p class="small">No app to install: make your own private bot with @BotFather, then run <code>toby telegram setup</code> on the computer. Only your account can use it, and you get instant notifications when tasks finish.</p>
+        <a class="btn" href="https://github.com/mr1charles/linux-ai-assistant-/blob/main/docs/TELEGRAM.md">Telegram guide</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <h2>Good to know</h2>
+    <div class="grid">
+      <div class="card"><h3>Your computer does the thinking</h3><p>Everything runs on a local model. The only things that go online are the ones that must, like a site you asked it to open, or your phone reaching your computer.</p></div>
+      <div class="card"><h3>Small models make mistakes</h3><p>On a small local model, Toby sometimes answers a question about your computer without actually checking. A bigger model, or the optional cloud mode, does better.</p></div>
+      <div class="card"><h3>It's early</h3><p>Built by one person and still young. Found a bug or have an idea? <a href="https://github.com/mr1charles/linux-ai-assistant-/issues">Open an issue</a>.</p></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">Little Toby is free and open source. <a href="https://github.com/mr1charles/linux-ai-assistant-">Source on GitHub</a> · <a href="https://github.com/mr1charles/linux-ai-assistant-/releases">All releases</a></div>
+</footer>
+<script>
+document.querySelectorAll(".copy").forEach(function (b) {
+  b.addEventListener("click", function () {
+    var text = document.getElementById(b.dataset.copy).textContent;
+    (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(function () {
+      b.textContent = "Copied"; setTimeout(function () { b.textContent = "Copy"; }, 1600);
+    }, function () { b.textContent = "Select & copy"; });
+  });
+});
+</script>
+</body>
+</html>

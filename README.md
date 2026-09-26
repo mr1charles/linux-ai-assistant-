@@ -1,5 +1,9 @@
 # Little Toby
 
+**Website: [mr1charles.github.io/linux-ai-assistant-](https://mr1charles.github.io/linux-ai-assistant-/)** ·
+[iPhone app](https://github.com/mr1charles/linux-ai-assistant-/releases/latest/download/LittleToby-unsigned.ipa) ·
+[Android app](https://github.com/mr1charles/linux-ai-assistant-/releases/latest/download/LittleToby.apk)
+
 A local-first desktop AI assistant for Hyprland on Arch/CachyOS, with a
 character. Press Super+G and a small chibi face wakes up in a rainbow ring
 at the bottom of your screen. Ask it something and it answers; ask it to
@@ -360,11 +364,10 @@ running?", "run the tests in ~/project", "open Claude Code in my project",
 phone shows the task live: each step as it happens, what it found, anything
 waiting for your OK, and the reply.
 
-There's a native iPhone app (download it from the
+There's a native iPhone app and an Android app (download them from the
 [latest release](https://github.com/mr1charles/linux-ai-assistant-/releases/latest);
-[docs/COMPANION.md](docs/COMPANION.md) explains installing it) and a web
-app for Android or any browser. Both pair the
-same way:
+[docs/COMPANION.md](docs/COMPANION.md) explains installing them), and a web
+app for any browser. All of them pair the same way:
 
 ```bash
 toby phone on       # once: sets up Tailscale publishing and starts pairing
@@ -372,7 +375,8 @@ toby phone on       # once: sets up Tailscale publishing and starts pairing
 
 After that, pair more phones from Toby's **Settings, Phone, Connect a phone**,
 or with `toby phone pair`. Either shows a QR code and an eight-character
-code. Scan it in the iPhone app (or with the camera, for the web app), check
+code. Scan it in the iPhone app, paste the link into the Android app (or scan it
+with the camera, for the web app), check
 that the phone and the computer show the same six-digit number, and approve
 on the computer. Only the computer can approve a new phone.
 
