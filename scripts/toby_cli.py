@@ -11,6 +11,7 @@ toby — the one command for Little Toby.
     toby island on | off    show or hide the Dynamic Island pill
     toby telegram setup | pair | status | unpair <name> | off
     toby notes set <folder> | off | status | search <words>
+    toby queue [add "<task>" | run | file]   things for Toby to do overnight
     toby model [name]       show the model in use, or choose one
     toby doctor             check everything, change nothing
     toby update             pull the latest version and refresh dependencies
@@ -438,6 +439,54 @@ def cmd_telegram(args, ask=input, secret=None):
 # notes
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# the overnight queue
+# ---------------------------------------------------------------------------
+
+QUEUE_MARKS = {" ": "to do", "x": "done", "!": "needs you", "~": "working"}
+
+
+def cmd_queue(args):
+    import notes
+    import task_queue
+
+    settings = load_settings()
+    path = task_queue.queue_path(notes.folder(settings))
+    action = args[0] if args else "list"
+    if action == "add":
+        try:
+            text = task_queue.add(path, " ".join(args[1:]))
+        except ValueError:
+            say('Say what to do, e.g.: toby queue add "summarize ~/project/README.md"')
+            return 1
+        say(f"Added: {text}")
+        at = task_queue.parse(f"- [ ] {text}")[0].at
+        when = (f"at {at[0]:02d}:{at[1]:02d}" if at else
+                f"between {settings.get('queue_start', '01:00')} and {settings.get('queue_end', '07:00')}")
+        say(f"Toby does it {when} if the computer is awake, or now with: toby queue run")
+        return 0
+    if action == "run":
+        if not signal_process("linux_agent_apple.py", 0):
+            say("Toby isn't running. Start it with: toby start")
+            return 1
+        task_queue.QueueRunner(lambda: path, None, None, lambda: settings, None).request_run_now()
+        say("Toby will start on the queue within half a minute, once it isn't busy.")
+        return 0
+    if action == "file":
+        say(str(task_queue.ensure(path)))
+        return 0
+    if not path.exists():
+        say(f"The queue is empty. Add a task with: toby queue add \"…\"  (it lives in {path})")
+        return 0
+    items = task_queue.parse(path.read_text())
+    if not items:
+        say(f"The queue is empty. Add a task with: toby queue add \"…\"  (it lives in {path})")
+    for item in items:
+        say(f"{QUEUE_MARKS.get(item.state, item.state):<10} {item.text}")
+    say(f"({path})")
+    return 0
+
+
 def _count(n, word):
     return f"{n} {word}{'' if n == 1 else 's'}"
 
@@ -618,6 +667,7 @@ COMMANDS = {
     "show": cmd_show, "start": cmd_start, "stop": cmd_stop, "restart": cmd_restart,
     "status": cmd_status, "sleep": cmd_sleep, "fold": cmd_fold, "phone": cmd_phone,
     "animations": cmd_animations, "island": cmd_island, "telegram": cmd_telegram, "notes": cmd_notes,
+    "queue": cmd_queue,
     "model": cmd_model, "doctor": cmd_doctor,
     "update": cmd_update, "uninstall": cmd_uninstall,
 }

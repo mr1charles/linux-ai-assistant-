@@ -260,7 +260,9 @@ def main():
     toby.publish()
     ask3 = fake.message_with(OWNER["id"], "restricted action")
     approval3 = ask3["buttons"][0][0]["callback_data"].split(":")[1]
-    fake.tap(OWNER, ask3["message_id"], f"a:{approval3}:y")
+    check(ask3["buttons"][0][0]["callback_data"].endswith(":r"),
+          "a restricted action's Allow button can only lead to a second question")
+    fake.tap(OWNER, ask3["message_id"], ask3["buttons"][0][0]["callback_data"])
     fake.wait_for(lambda: "Really allow this?" in fake.messages[ask3["message_id"]]["text"], what="the second ask")
     check(any(a["id"] == approval3 for a in toby.approvals.pending()), "one tap on a restricted action isn't enough")
     fake.tap(OWNER, ask3["message_id"], f"a:{approval3}:Y")
@@ -288,6 +290,13 @@ def main():
     fake.voice(OWNER)
     fake.message_with(OWNER["id"], "needs ffmpeg")
     check(True, "without ffmpeg, it says what's missing instead of pretending")
+
+    # -- the overnight queue ----------------------------------------------------------------------
+    fake.say(OWNER, "/queue summarize ~/project/README.md")
+    fake.message_with(OWNER["id"], "Added to the queue: summarize ~/project/README.md")
+    fake.say(OWNER, "/queue")
+    fake.message_with(OWNER["id"], "to do: summarize ~/project/README.md")
+    check(True, "/queue adds a task for tonight, and lists what's queued")
 
     # -- screenshots stay home unless allowed ----------------------------------------------------
     fake.say(OWNER, "/screen")

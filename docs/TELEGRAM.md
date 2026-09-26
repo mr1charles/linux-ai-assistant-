@@ -49,6 +49,7 @@ computer with the same offline speech model as Voice Mode, and it needs
 | `/pause`, `/resume`, `/stop` | the task in progress |
 | `/screen` | a screenshot, only if you've allowed it (below) |
 | `/workmode on`, `off` | Work Mode |
+| `/queue`, `/queue <task>` | what's queued for tonight, or add a task ([the overnight queue](QUEUE.md)) |
 
 Anything that needs your OK arrives as a message with **Allow** and **Don't
 allow** buttons. It's also shown on the computer and any paired phone, and

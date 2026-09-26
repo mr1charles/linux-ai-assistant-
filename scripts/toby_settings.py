@@ -58,6 +58,11 @@ DEFAULTS = {
     "notes_in_prompt": True,           # put passages that match a request in front of the model
     "notes_daily_log": True,           # a line per task in <folder>/Toby/Log/<date>.md
 
+    # -- the overnight queue (see docs/QUEUE.md) --------------------------------
+    "queue_enabled": True,             # nothing happens until you add a task
+    "queue_start": "01:00",            # the night window for tasks without a time
+    "queue_end": "07:00",              # no new task starts after this; the tally is sent
+
     # -- Telegram (see docs/TELEGRAM.md) ---------------------------------------
     "telegram_enabled": False,         # set by `toby telegram setup`
     "telegram_screenshots": False,     # /screen sends a screenshot through Telegram's servers; opt in

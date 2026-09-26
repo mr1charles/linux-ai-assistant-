@@ -32,6 +32,7 @@ CATEGORIES = {
     "job_failed": True,
     "power": True,              # the computer is going to sleep or shutting down
     "device": True,             # a phone was paired or unpaired
+    "queue": True,              # the morning tally of what the overnight queue did
 }
 
 

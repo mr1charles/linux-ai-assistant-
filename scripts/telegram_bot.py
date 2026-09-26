@@ -53,7 +53,7 @@ MAX_MESSAGE = 4096
 EDIT_EVERY_S = 1.5          # Telegram limits edits; a step list doesn't need more
 POLL_TIMEOUT_S = 25
 PAIR_TTL_S = 300
-FORWARDED_EVENTS = ("job_done", "job_failed", "power", "device")
+FORWARDED_EVENTS = ("job_done", "job_failed", "power", "device", "queue")
 FINISHED = ("completed", "failed", "cancelled")
 
 STATE_WORDS = {
@@ -73,6 +73,7 @@ HELP = (
     "/pause  /resume  /stop  the task in progress\n"
     "/screen  a screenshot, if you've allowed it\n"
     "/workmode on|off\n"
+    "/queue  what's queued for tonight; /queue <task> adds one\n"
     "/help  this"
 )
 
@@ -482,7 +483,30 @@ class TelegramBot:
             return self.send(chat_id, html.escape(data.get("message") or _error(data)))
         if command == "/screen":
             return self.send_screen(chat_id)
+        if command == "/queue":
+            return self.handle_queue(chat_id, rest)
         return self.send(chat_id, "I don't know that one. /help lists what I can do.")
+
+    def handle_queue(self, chat_id, rest):
+        """The overnight queue is a file on this computer; read and add to it here."""
+        import notes
+        import task_queue
+        settings = self.settings()
+        path = task_queue.queue_path(notes.folder(settings))
+        if rest:
+            text = task_queue.add(path, rest)
+            at = task_queue.parse(f"- [ ] {text}")[0].at
+            when = (f"at {at[0]:02d}:{at[1]:02d}" if at else
+                    f"tonight between {settings.get('queue_start', '01:00')} and {settings.get('queue_end', '07:00')}")
+            return self.send(chat_id, f"Added to the queue: {html.escape(text)}\n"
+                                      f"Toby does it {when} if the computer is awake"
+                                      + ("." if at else " (start a task with \"at 14:30:\" for a time today)."))
+        items = task_queue.parse(path.read_text()) if path.exists() else []
+        if not items:
+            return self.send(chat_id, "The queue is empty. Add something: /queue summarize ~/project/README.md")
+        words = {" ": "to do", "x": "done", "!": "needs you", "~": "working"}
+        return self.send(chat_id, "\n".join(f"{words.get(i.state, i.state)}: {html.escape(i.text[:90])}"
+                                             for i in items[-15:]))
 
     def send_screen(self, chat_id):
         if not self.settings().get("telegram_screenshots", False):
@@ -539,14 +563,14 @@ class TelegramBot:
             if approval["id"] in self.approval_messages:
                 continue
             text, buttons = self._approval_message(approval)
+            if approval.get("level") == "restricted":
+                self.restricted[approval["id"]] = approval
             sent = []
             for chat_id in self.chats():
                 message = self.send(chat_id, text, buttons=buttons)
                 if message:
                     sent.append((chat_id, message["message_id"], approval["title"]))
             self.approval_messages[approval["id"]] = sent
-            if approval.get("level") == "restricted":
-                self.restricted[approval["id"]] = approval
         for approval_id in [a for a in self.approval_messages if a not in pending_ids]:
             outcome = self.answered.pop(approval_id, None)
             for chat_id, message_id, title in self.approval_messages.pop(approval_id):
@@ -561,7 +585,11 @@ class TelegramBot:
             lines.append("· " + html.escape(str(detail)))
         if approval.get("level") == "restricted":
             lines.append("<b>This is a restricted action.</b> " + html.escape(approval.get("reason") or ""))
-        buttons = [[{"text": "Allow", "callback_data": f"a:{approval['id']}:y"},
+        # A restricted action's Allow ("r") only ever leads to a second question;
+        # the yes that counts ("Y") is on that one. Carried in the button itself,
+        # so no timing or restart can make one tap enough.
+        first = "r" if approval.get("level") == "restricted" else "y"
+        buttons = [[{"text": "Allow", "callback_data": f"a:{approval['id']}:{first}"},
                     {"text": "Don't allow", "callback_data": f"a:{approval['id']}:n"}]]
         return "\n".join(lines), buttons
 
@@ -575,21 +603,25 @@ class TelegramBot:
         approval_id, choice = parts[1], parts[2]
         message = query.get("message") or {}
         chat_id, message_id = (message.get("chat") or {}).get("id"), message.get("message_id")
-        approval = self.restricted.get(approval_id)
-        if choice == "y" and approval is not None:
+        if choice == "r" or (choice == "y" and approval_id in self.restricted):
             # A restricted action: say what it is once more and ask again.
+            approval = self.restricted.get(approval_id) or {}
             self.tg.call("answerCallbackQuery", {"callback_query_id": query["id"]})
             return self.edit(chat_id, message_id,
-                             f"<b>Really allow this?</b> {html.escape(approval['title'])}\n"
+                             f"<b>Really allow this?</b> {html.escape(approval.get('title', 'This restricted action'))}\n"
                              f"{html.escape(approval.get('reason') or 'It is a restricted action.')}",
                              buttons=[[{"text": "Yes, allow it", "callback_data": f"a:{approval_id}:Y"},
                                        {"text": "No", "callback_data": f"a:{approval_id}:n"}]])
+        if choice not in ("y", "Y", "n"):
+            return self.tg.call("answerCallbackQuery", {"callback_query_id": query["id"]})
         allow = choice in ("y", "Y")
+        # Noted before answering: the state watcher can see the question go
+        # before the answer's reply gets back here.
+        self.answered[approval_id] = f"{'Allowed' if allow else 'Not allowed'} by {describe_user(user)}."
         status, data = self.toby.post("/api/approve", {"id": approval_id, "allow": allow})
         ok = status == 200 and data.get("ok")
-        who = describe_user(user)
-        if ok:
-            self.answered[approval_id] = f"{'Allowed' if allow else 'Not allowed'} by {who}."
+        if not ok:
+            self.answered.pop(approval_id, None)
         self.tg.call("answerCallbackQuery", {"callback_query_id": query["id"],
                                              "text": ("Allowed" if allow else "Not allowed") if ok
                                              else "Too late: it was already answered or timed out."})

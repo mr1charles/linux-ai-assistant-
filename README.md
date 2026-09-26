@@ -76,6 +76,7 @@ Everything after installing is one command:
 | `toby island on`, `off` | show or hide the Dynamic Island pill (also in Settings) |
 | `toby telegram setup`, `pair`, `status`, `off` | talk to Toby through your own Telegram bot |
 | `toby notes set <folder>`, `status`, `search`, `off` | use your notes folder (e.g. Obsidian) as Toby's memory |
+| `toby queue`, `queue add "<task>"`, `queue run` | things for Toby to do overnight |
 | `toby model`, `toby model <name>` | see or choose the local model |
 | `toby update` | pull the latest version and refresh dependencies |
 | `toby uninstall` | remove services and the command; keeps your data |
@@ -440,6 +441,20 @@ Health…), hidden folders and anything in a `.tobyignore` file are never
 read, and anything that looks like a password or key is hidden from the
 model. The search is local (SQLite full-text search, no AI model, no new
 packages). See [docs/NOTES.md](docs/NOTES.md).
+
+## The overnight queue
+
+Write tasks in a checklist (`Toby/Queue.md` in your notes, or
+`~/linux-agent/Queue.md`), or say "tonight, …", or send `/queue …` on
+Telegram, and Toby works through them between 01:00 and 07:00 while the
+computer is awake. One at a time, and only when it isn't busy with you. Each
+is ticked off with a link to what Toby found in `Outbox/`, and you get one
+tally in the morning. A task starting "at 14:30:" runs then instead.
+Nobody's there to say yes at night, so anything that needs your OK
+(changing files, running commands) is left for you and marked *needs you*,
+not done. Looking, reading, searching your notes and writing reports all
+work. The computer has to be awake: a closed lid means the queue waits (or
+run it any time with `toby queue run`). See [docs/QUEUE.md](docs/QUEUE.md).
 
 ## Work Mode
 

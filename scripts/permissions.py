@@ -54,7 +54,7 @@ TOOL_LEVELS = {
     "set_school_schedule": SAFE, "disable_control": SAFE,
     # your notes: searching them, and Toby's own pages in them (Toby/Memory.md,
     # Toby/Notes/), which it only ever adds to
-    "search_notes": SAFE, "remember": SAFE, "add_note": SAFE,
+    "search_notes": SAFE, "remember": SAFE, "add_note": SAFE, "queue_task": SAFE,
     # changing
     "write_file": CONFIRM, "move_file": CONFIRM, "trash_files": CONFIRM,
     "run_command": CONFIRM, "open_terminal": CONFIRM, "stop_program": CONFIRM,

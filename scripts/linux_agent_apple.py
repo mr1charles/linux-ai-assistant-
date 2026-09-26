@@ -71,6 +71,7 @@ import notes
 import notify
 import permissions
 import screen_view
+import task_queue
 import tasks
 import work_mode
 
@@ -167,6 +168,7 @@ inside actions, even for a single action. Each is one of:
   {{"tool": "search_notes", "query": "dentist appointment"}}
   {{"tool": "remember", "text": "Prefers tea to coffee", "category": "food"}}
   {{"tool": "add_note", "title": "Gift ideas", "text": "..."}}
+  {{"tool": "queue_task", "text": "Summarize ~/project/README.md", "at": ""}}
 
 "reply" is shown to the user. "mood" reflects how the reply should feel — pick whichever fits.
 
@@ -183,7 +185,11 @@ Rules:
   list_programs, stop_program, list_files, search_files, read_file, write_file,
   move_file, trash_files, open_path, open_terminal, run_command, job_status,
   watch_job, download_file, look_at_screen, click_on, drag, scroll, draw, write_by_hand,
-  search_notes, remember, add_note.
+  search_notes, remember, add_note, queue_task.
+- queue_task adds something to the user's queue for Toby to do later: tonight while they
+  sleep (leave "at" empty), or at a time today ("at": "14:30"). Use it when they say
+  "tonight", "overnight", "later", "while I sleep" or "at 3pm". Queued tasks can look,
+  read and write notes, but anything that needs the user's OK is left for them.
 - The user's own notes: search_notes searches their notes folder and returns matching
   passages with the note's name; use it when they ask what their notes say or about
   something they wrote down. Passages that already look relevant may be in the context
@@ -507,6 +513,35 @@ def _add_note(a):
 knowledge.use_notes(notes_root)
 
 
+def queue_file():
+    return task_queue.queue_path(notes_root())
+
+
+def _queue_task(a):
+    at = str(a.get("at") or "").strip()
+    if at and not re.fullmatch(r"\d{1,2}:\d{2}", at):
+        return "The time should look like 14:30."
+    try:
+        text = task_queue.add(queue_file(), str(a.get("text", "")), at or None)
+    except ValueError:
+        return "Say what Toby should do."
+    window = f"{SETTINGS.get('queue_start', '01:00')} and {SETTINGS.get('queue_end', '07:00')}"
+    when = f"at {at}" if at else f"tonight, between {window}, if the computer is awake"
+    return f"Added to the queue ({queue_file()}): \"{text}\". Toby will do it {when}."
+
+
+def _inhibit_idle():
+    """Ask the system not to idle-suspend while a queued task runs. Returns a
+    function that lets it go. A closed lid still suspends: that's yours."""
+    try:
+        proc = subprocess.Popen(["systemd-inhibit", "--what=idle", "--who=Little Toby",
+                                 "--why=Working through your queue", "--mode=block", "sleep", "infinity"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        return None
+    return proc.terminate
+
+
 # ---------------------------------------------------------------------------
 # Pointer driver — used by Camera Mode's pinch-to-point
 #
@@ -663,6 +698,7 @@ DISPATCH = {
     "search_notes": _search_notes,
     "remember": _remember,
     "add_note": _add_note,
+    "queue_task": lambda a: _queue_task(a),
     # run_command, download_file, job_status and watch_job need the running
     # task and the job list, so the window adds them (see _install_job_tools)
 }
@@ -746,6 +782,7 @@ def describe_action(action):
         "search_notes": f"Search your notes for \"{short(action.get('query', ''), 20)}\"",
         "remember": "Remember that",
         "add_note": f"Save a note: {short(action.get('title', ''), 22)}",
+        "queue_task": f"Add to the queue: {short(action.get('text', ''), 20)}",
     }
     return labels.get(tool, tool.replace("_", " ").capitalize() or "Step")
 
@@ -3476,6 +3513,13 @@ class AssistantWindow(Gtk.Window):
         self._resume_event = threading.Event()
         self._resume_event.set()
         self._power_state = "awake"
+        # The overnight queue (task_queue.py): what a queued task wanted to do
+        # but that needed you, and the sentence a step says when it's left.
+        self._queue_left = []
+        self._decline_note = None
+        self.queue = task_queue.QueueRunner(queue_file, ask=self._queue_ask, busy=lambda: self._busy,
+                                            settings=lambda: SETTINGS, notify=self._queue_summary,
+                                            inhibit=_inhibit_idle)
         self._install_job_tools()
         self.work = work_mode.WorkMode(screen_control, windows=computer_tools.list_windows,
                                        settings=lambda: SETTINGS, cursor=self._pen_cursor)
@@ -4282,6 +4326,7 @@ class AssistantWindow(Gtk.Window):
             self.apply_accent_color(saved_accent)
         # last, so everything it reports on already exists
         self._start_remote_bridge()
+        GLib.timeout_add_seconds(20, self._queue_tick)
         threading.Thread(target=self._desktop_setup, daemon=True).start()
         if SETTINGS.get("startup_greeting", True):
             GLib.timeout_add(900, self._startup_greeting)
@@ -4490,6 +4535,46 @@ class AssistantWindow(Gtk.Window):
             bus.signal_subscribe("org.freedesktop.login1", "org.freedesktop.login1.Manager", signal_name,
                                  "/org/freedesktop/login1", None, Gio.DBusSignalFlags.NONE, on_signal)
         self._system_bus = bus
+
+    # -- the overnight queue ------------------------------------------------------------
+    def _queue_tick(self):
+        try:
+            item = self.queue.tick()
+        except OSError as e:
+            print("QUEUE:", e, flush=True)
+            return True
+        if item is not None:
+            print(f"QUEUE: starting \"{item.title}\"", flush=True)
+            threading.Thread(target=self.queue.run, args=(item,), daemon=True, name="queue").start()
+        return True
+
+    def _queue_ask(self, prompt, limit_s=45 * 60):
+        """Run one queued task the normal way, and wait for it (on the queue's
+        thread). Returns the task's record."""
+        if self._busy:
+            return {"state": "failed", "reply": "Toby was busy with something else."}
+        self._busy = True
+        self._queue_left = []
+        task_id = TASKS.start(prompt, "queue")
+        GLib.idle_add(self._remote_ask, prompt, "queue", task_id)
+        deadline = time.monotonic() + limit_s
+        while time.monotonic() < deadline:
+            record = TASKS.get(task_id)
+            if record and record["state"] in tasks.FINISHED and not self._busy:
+                break
+            time.sleep(1)
+        else:
+            GLib.idle_add(lambda: self.on_task_cancel() or False)
+            time.sleep(5)
+        record = TASKS.get(task_id) or {"state": "failed", "reply": "The task was lost."}
+        record["left_for_you"] = list(self._queue_left)
+        return record
+
+    def _queue_summary(self, title, body):
+        """The morning note: one notification, and a card if the island's on."""
+        self._event("queue", title, body)
+        GLib.idle_add(lambda: self.island.show_island(title) and False)
+        GLib.timeout_add_seconds(8, lambda: (not self._busy and self.island.hide_island()) and False)
 
     def _remote_ask(self, text, origin="phone", task_id=None):
         self._next_origin = origin
@@ -5775,6 +5860,7 @@ class AssistantWindow(Gtk.Window):
         self._next_origin = None
         self.current_task_id = self._next_task_id or TASKS.start(text, self._task_origin)
         self._next_task_id = None
+        self._decline_note = None
         computer_tools.touched(reset=True)
         self._voice_spoken_len = 0
         if self.island_expanded.get_visible():
@@ -5990,8 +6076,8 @@ class AssistantWindow(Gtk.Window):
             elif decision.level != permissions.SAFE and tool != "install_package":
                 if not self._await_confirmation(decision.title, kind="action", level=decision.level,
                                                 details=decision.details, reason=decision.reason, tool=tool):
-                    fail(index, action, "You said no, so Toby stopped here." if not self.task_cancelled
-                         else "Cancelled.")
+                    fail(index, action, "Cancelled." if self.task_cancelled
+                         else self._decline_note or "You said no, so Toby stopped here.")
                     break
             try:
                 self._chibi_choreograph(action)
@@ -6004,7 +6090,7 @@ class AssistantWindow(Gtk.Window):
                     install = tool == "install_package"
                     title = f"Install {action.get('package', 'a package')}?" if install else None
                     if not self._await_confirmation(title, kind="install" if install else "control", tool=tool):
-                        fail(index, action, "You said no, so Toby stopped here.")
+                        fail(index, action, self._decline_note or "You said no, so Toby stopped here.")
                         break
                     result_summary = fn(action)
                 text_out = str(result_summary)
@@ -6034,6 +6120,12 @@ class AssistantWindow(Gtk.Window):
         """
         if kind == "control" and not details:
             details = ["Toby will move the pointer, click and type for you until you turn it off."]
+        if self._task_origin == "queue":
+            # Working through the queue while you sleep: nobody to ask, and
+            # waking you isn't the point. Leave it for you instead.
+            self._queue_left.append(title or self.CONFIRM_TEXT)
+            self._decline_note = "Left for you: this needs your OK, and you weren't there to give it."
+            return False
         if self.chibi_director.visible:
             GLib.idle_add(lambda: self.chibi_director.ask_permission() and False)
         self._set_task_state("needs_permission")

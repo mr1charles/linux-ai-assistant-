@@ -37,6 +37,12 @@ telegram.tmp
 notes_index.sqlite
 notes_index.sqlite-*
 
+# The overnight queue and what Toby found (when there's no notes folder)
+/Queue.md
+/Outbox/
+queue_state.json
+queue_state.json.run-now
+
 # Toby's private Python environment (install.sh creates it)
 .venv/
 

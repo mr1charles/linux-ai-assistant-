@@ -67,6 +67,14 @@ HOME="$tmp_home" timeout 60 "$PY" tests/test_notes.py || status=1
 HOME="$tmp_home" timeout 120 "$PY" tests/test_notes_app.py || status=1
 rm -rf "$tmp_home"
 
+echo "== overnight queue =="
+tmp_home="$(make_home)"
+HOME="$tmp_home" timeout 60 "$PY" tests/test_queue.py || status=1
+if command -v xvfb-run >/dev/null 2>&1; then
+    HOME="$tmp_home" timeout 180 xvfb-run -a "$PY" tests/test_queue_app.py || status=1
+fi
+rm -rf "$tmp_home"
+
 echo "== telegram =="
 tmp_home="$(make_home)"
 HOME="$tmp_home" timeout 180 "$PY" tests/test_telegram.py || status=1
