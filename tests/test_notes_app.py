@@ -43,6 +43,10 @@ check("Dentist › Appointments" in tail and "14 October" in tail, "the matching
 check("From the user's own notes" not in app._build_system_content("open youtube"),
       "an unrelated request carries nothing from the notes")
 check("From the user's own notes" not in app._build_system_content(), "follow-up rounds without a query carry nothing")
+follow_up = ("open youtube\n\n[WHAT YOUR ACTIONS RETURNED: real results from the computer]\n"
+             "- Read notes [ok]: dentist check-up appointments on tuesday")
+check("From the user's own notes" not in app._build_system_content(follow_up),
+      "tool output in a follow-up round doesn't pull in notes; only what was asked does")
 
 found = app.DISPATCH["search_notes"]({"query": "dentist tuesday"})
 check("Dentist.md" in found and "14 October" in found, "search_notes returns the passage and its note")

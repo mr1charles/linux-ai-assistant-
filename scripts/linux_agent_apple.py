@@ -1027,6 +1027,8 @@ def _build_volatile_context(query=None):
         parts.append(notes_context)
 
     if query and SETTINGS.get("notes_in_prompt", True):
+        # what was asked, not the tool output a follow-up round carries after it
+        query = query.split("\n\n[WHAT YOUR ACTIONS RETURNED", 1)[0]
         try:
             from_notes = notes.context_for(notes_index(), query, MAX_VAULT_CHARS)
         except Exception as e:  # a notes problem must never stop Toby answering

@@ -295,9 +295,12 @@ class QueueRunner:
                 mark(path, item, " ", "")
                 item.state = " "
         state = load_state(self.state_path)
+        before = json.dumps(state, sort_keys=True)
         item = next_due(items, now, state, self.window(), run_now)
         keys = {i.key for i in items}
-        save_state({k: v for k, v in state.items() if k in keys or k == "_summary"}, self.state_path)
+        state = {k: v for k, v in state.items() if k in keys or k == "_summary"}
+        if json.dumps(state, sort_keys=True) != before:       # don't write every tick for nothing
+            save_state(state, self.state_path)
         if item is None:
             if run_now:
                 self.run_now_flag.unlink(missing_ok=True)
