@@ -43,7 +43,8 @@ jobs:
           gradle --no-daemon assembleRelease
           version="$(tr -d '[:space:]' < ../VERSION)"
           cp app/build/outputs/apk/release/app-release.apk "../LittleToby-$version.apk"
-          "$ANDROID_HOME"/build-tools/*/apksigner verify --print-certs "../LittleToby-$version.apk" | head -3 || true
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)/apksigner"
+          "$apksigner" verify --print-certs "../LittleToby-$version.apk" | grep -E "DN|SHA-256"
       - uses: actions/upload-artifact@v4
         with:
           name: apk
