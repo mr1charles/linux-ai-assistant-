@@ -1,0 +1,48 @@
+plugins {
+    id "com.android.application"
+}
+
+// The version comes from the repository's VERSION file, like the iPhone app's.
+def tobyVersion = file("../../VERSION").text.trim()
+def parts = tobyVersion.tokenize(".").collect { it as int }
+
+android {
+    namespace "com.littletoby.app"
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.littletoby.app"
+        minSdk 24
+        targetSdk 35
+        versionName tobyVersion
+        versionCode parts[0] * 10000 + parts[1] * 100 + parts[2]
+    }
+
+    // Release builds are signed with the key in TOBY_KEYSTORE (set by CI from
+    // a repository secret). Without it they fall back to the debug key, which
+    // still installs, but can't update an APK signed with the real key.
+    signingConfigs {
+        release {
+            def ks = System.getenv("TOBY_KEYSTORE")
+            if (ks) {
+                storeFile file(ks)
+                storeType "pkcs12"
+                storePassword System.getenv("TOBY_KEYSTORE_PASSWORD")
+                keyAlias System.getenv("TOBY_KEY_ALIAS") ?: "toby"
+                keyPassword System.getenv("TOBY_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig System.getenv("TOBY_KEYSTORE") ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Toby" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/toby_bg</item>
+        <item name="android:statusBarColor">@color/toby_bg</item>
+        <item name="android:navigationBarColor">@color/toby_bg</item>
+        <item name="android:colorAccent">@color/toby_accent</item>
+    </style>
+    <color name="toby_bg">#0b0c17</color>
+    <color name="toby_accent">#ffa626</color>
+</resources>
